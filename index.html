@@ -54,60 +54,46 @@
         const parseWeaponString = (text) => {
             const weapons = [];
             const lines = text.split('\n');
-            
-            // Regex to find weapon stats: A, BS/WS, S, AP, D
-            // Matches formats like: "A2", "A D6+1", "BS 3+", "S4", "AP-1", "D2", "D D3"
             const regex = /A\s*(\d+|D\d+(?:\+\d+)?).*?(?:BS|WS)\s*(\d+)\+.*?S\s*(\d+).*?AP\s*(-?\d+).*?D\s*(\d+|D\d+(?:\+\d+)?)/i;
 
             lines.forEach(line => {
                 const match = line.match(regex);
                 if (match) {
-                    const nameMatch = line.split(/[\[\-]/)[0].trim(); // Grab text before keywords or stats
+                    const nameMatch = line.split(/[\[\-]/)[0].trim();
                     const name = nameMatch.length > 20 ? "Imported Weapon" : nameMatch || "Weapon";
                     
-                    // Parse Dice Values (e.g., "D6+1")
                     const parseDice = (val) => {
                         val = val.toUpperCase();
                         let type = 'fixed', fixed = 0, mod = 0;
                         if (val.includes('D')) {
                             if (val.includes('D3')) type = 'D3';
                             else if (val.includes('D6')) type = 'D6';
-                            
                             const parts = val.split('+');
                             if (parts[1]) mod = parseInt(parts[1]);
-                        } else {
-                            fixed = parseInt(val);
-                        }
+                        } else { fixed = parseInt(val); }
                         return { type, fixed, mod };
                     };
 
                     const atk = parseDice(match[1]);
                     const bs = parseInt(match[2]);
                     const s = parseInt(match[3]);
-                    const ap = Math.abs(parseInt(match[4])); // Ensure positive for slider (0-6) usually
+                    const ap = Math.abs(parseInt(match[4]));
                     const dmg = parseDice(match[5]);
-
-                    // Keywords Detection
                     const lowerLine = line.toLowerCase();
-                    const newWeapon = {
-                        ...DEFAULT_PROFILE,
-                        id: generateId(),
-                        name: name,
+
+                    weapons.push({
+                        ...DEFAULT_PROFILE, id: generateId(), name: name,
                         atkDice: atk.type, atkFixed: atk.fixed || 1, atkMod: atk.mod,
                         bs: bs, strength: s, ap: ap,
                         dmgDice: dmg.type, dmgFixed: dmg.fixed || 1, dmgMod: dmg.mod,
                         lethalHits: lowerLine.includes('lethal hits'),
                         devastatingWounds: lowerLine.includes('devastating wounds'),
-                        sustainedHits: lowerLine.includes('sustained hits 1') ? 1 : 0, // Simplified parsing
-                        blast: lowerLine.includes('blast'),
-                        torrent: lowerLine.includes('torrent'),
-                        heavy: lowerLine.includes('heavy'),
-                        twinLinked: lowerLine.includes('twin-linked'),
-                        lance: lowerLine.includes('lance'),
-                        melta: lowerLine.includes('melta'),
+                        sustainedHits: lowerLine.includes('sustained hits 1') ? 1 : 0,
+                        blast: lowerLine.includes('blast'), torrent: lowerLine.includes('torrent'),
+                        heavy: lowerLine.includes('heavy'), twinLinked: lowerLine.includes('twin-linked'),
+                        lance: lowerLine.includes('lance'), melta: lowerLine.includes('melta'),
                         rapidFire: lowerLine.includes('rapid fire')
-                    };
-                    weapons.push(newWeapon);
+                    });
                 }
             });
             return weapons;
@@ -136,15 +122,12 @@
 
                     for (const prof of profiles) {
                         const critThreshold = prof.critHitOnFive ? 5 : 6;
-                        
-                        // 1. Attacks
                         let nAtk = 0;
                         for(let m=0; m<prof.count; m++) nAtk += rollVal(prof.atkDice, prof.atkFixed, prof.atkMod);
                         if (prof.blast) nAtk += Math.floor(defenderModels / 5);
                         if (prof.rapidFire && prof.halfRange) nAtk += (prof.rapidFireVal * prof.count);
                         totalAtk += nAtk;
 
-                        // 2. Hits
                         let nHit = 0, nAuto = 0, nCrit = 0;
                         if (prof.torrent) { nHit = nAtk; } else {
                             for (let a=0; a<nAtk; a++) {
@@ -160,7 +143,6 @@
                         }
                         totalHits += nHit;
 
-                        // 3. Wounds
                         let wPool = nHit - (prof.lethalHits ? nCrit : 0); 
                         if (prof.torrent) wPool = nHit;
                         let nWnd = 0, nCritWnd = 0;
@@ -183,14 +165,12 @@
                         totalWnds += (normalWnds + nCritWnd);
                         if (prof.devastatingWounds) { mortalDice = nCritWnd; } else { normalWnds += nCritWnd; }
 
-                        // 4. Saves
                         let nUnsaved = 0;
                         const svTgt = save + prof.ap;
                         let bestSv = (invuln < 7 && invuln < svTgt) ? invuln : svTgt;
                         for(let s=0; s<normalWnds; s++) { if (bestSv > 6) nUnsaved++; else { if (rollDie(6) < bestSv) nUnsaved++; } }
                         totalSavesFailed += nUnsaved;
 
-                        // 5. Damage
                         if (deadModelsThisRun >= defenderModels) continue;
 
                         const getDmg = () => {
@@ -412,16 +392,47 @@
             </div>
         );
 
-        const ProfileModal = ({ onClose, onLoad }) => {
-            const [profiles, setProfiles] = useState([]);
+        const ProfileModal = ({ onClose, onLoad, profiles, setProfiles }) => {
             const [newProfileName, setNewProfileName] = useState("");
             useEffect(() => { const saved = safeStorage.get('mh_pro_v3_profiles'); if (saved) try { setProfiles(JSON.parse(saved)); } catch(e){} }, []);
             const saveProfile = (data) => { if(!newProfileName.trim()) return; const newP = [...profiles, { name: newProfileName, data }]; setProfiles(newP); safeStorage.set('mh_pro_v3_profiles', JSON.stringify(newP)); setNewProfileName(""); };
             const deleteProfile = (idx) => { const newP = profiles.filter((_,i) => i !== idx); setProfiles(newP); safeStorage.set('mh_pro_v3_profiles', JSON.stringify(newP)); }
+            
+            const exportData = () => {
+                const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(profiles));
+                const downloadAnchorNode = document.createElement('a');
+                downloadAnchorNode.setAttribute("href", dataStr);
+                downloadAnchorNode.setAttribute("download", "mathhammer_data.json");
+                document.body.appendChild(downloadAnchorNode); // required for firefox
+                downloadAnchorNode.click();
+                downloadAnchorNode.remove();
+            };
+
+            const importData = (event) => {
+                const fileReader = new FileReader();
+                fileReader.readAsText(event.target.files[0], "UTF-8");
+                fileReader.onload = e => {
+                    try {
+                        const parsed = JSON.parse(e.target.result);
+                        setProfiles(parsed);
+                        safeStorage.set('mh_pro_v3_profiles', JSON.stringify(parsed));
+                    } catch(err) { console.error("Invalid JSON"); }
+                };
+            };
+
             return (
                 <Modal title="Profile Manager" onClose={onClose}>
-                    <div className="flex gap-2 mb-6"><input type="text" value={newProfileName} onChange={(e) => setNewProfileName(e.target.value)} placeholder="Name..." className="flex-1 bg-slate-800 border border-slate-600 rounded p-2 text-white" /><button onClick={() => onLoad((data) => saveProfile(data))} className="bg-yellow-600 hover:bg-yellow-500 text-white font-bold px-4 rounded">Save</button></div>
-                    <div className="space-y-2 max-h-60 overflow-y-auto custom-scrollbar">{profiles.map((p, idx) => (<div key={idx} className="flex justify-between items-center bg-slate-800 p-3 rounded border border-slate-700"><span className="font-medium text-slate-200">{p.name}</span><div className="flex gap-2"><button onClick={() => { onLoad(null, p.data); onClose(); }} className="text-xs bg-blue-600 px-3 py-1 rounded text-white">Load</button><button onClick={() => deleteProfile(idx)} className="text-xs bg-red-900/50 text-red-200 px-2 py-1 rounded">Del</button></div></div>))}</div>
+                    <div className="flex gap-2 mb-4"><input type="text" value={newProfileName} onChange={(e) => setNewProfileName(e.target.value)} placeholder="Save current setup as..." className="flex-1 bg-slate-800 border border-slate-600 rounded p-2 text-white text-xs" /><button onClick={() => onLoad((data) => saveProfile(data))} className="bg-yellow-600 hover:bg-yellow-500 text-white font-bold px-4 rounded text-xs">SAVE</button></div>
+                    
+                    <div className="flex justify-between items-center mb-2 border-b border-slate-700 pb-2">
+                        <button onClick={exportData} className="flex items-center gap-1 text-xs text-blue-400 font-bold hover:text-blue-300">{Icons.Chart} EXPORT JSON</button>
+                        <label className="flex items-center gap-1 text-xs text-green-400 font-bold hover:text-green-300 cursor-pointer">
+                            {Icons.Save} IMPORT JSON
+                            <input type="file" className="hidden" onChange={importData} accept=".json" />
+                        </label>
+                    </div>
+
+                    <div className="space-y-2 max-h-60 overflow-y-auto custom-scrollbar">{profiles.map((p, idx) => (<div key={idx} className="flex justify-between items-center bg-slate-800 p-3 rounded border border-slate-700"><span className="font-medium text-slate-200 text-sm">{p.name}</span><div className="flex gap-2"><button onClick={() => { onLoad(null, p.data); onClose(); }} className="text-xs bg-blue-600 px-3 py-1 rounded text-white">Load</button><button onClick={() => deleteProfile(idx)} className="text-xs bg-red-900/50 text-red-200 px-2 py-1 rounded">Del</button></div></div>))}</div>
                 </Modal>
             );
         };
@@ -429,21 +440,14 @@
         const ImportModal = ({ onClose, onImport }) => {
             const [text, setText] = useState("");
             const parseAndImport = () => {
-                // Check if text contains weapon profiles (look for A, BS/WS, S, AP, D pattern)
                 const weapons = parseWeaponString(text);
-                
-                // Parse Defender Stats (T, Sv, W, etc)
                 const parseVal = (regex) => { const m = text.match(regex); return m ? parseInt(m[1]) : null; };
                 const t = parseVal(/(?:T|Toughness)[\s:]*(\d+)/i);
                 const sv = parseVal(/(?:Sv|Save)[\s:]*(\d+)\+?/i);
                 const w = parseVal(/(?:W|Wounds)[\s:]*(\d+)/i);
                 const inv = parseVal(/(?:Inv|Invuln)[\s:]*(\d+)\+?/i) || parseVal(/(\d+)\+\+/);
                 const fnp = parseVal(/(?:FNP|Feel No Pain)[\s:]*(\d+)\+?/i) || parseVal(/(\d+)\+\+\+/);
-                
-                onImport({ 
-                    defender: { t, sv, w, inv, fnp },
-                    weapons: weapons.length > 0 ? weapons : null
-                });
+                onImport({ defender: { t, sv, w, inv, fnp }, weapons: weapons.length > 0 ? weapons : null });
                 onClose();
             };
             return (
@@ -462,12 +466,7 @@
                 el.value = code;
                 document.body.appendChild(el);
                 el.select();
-                try {
-                    document.execCommand('copy');
-                    setCopied(true);
-                } catch (err) {
-                    console.error('Copy failed', err);
-                }
+                try { document.execCommand('copy'); setCopied(true); } catch (err) { }
                 document.body.removeChild(el);
                 setTimeout(() => setCopied(false), 2000);
             };
@@ -489,8 +488,25 @@
             const [showImport, setShowImport] = useState(false);
             const [showShare, setShowShare] = useState(false);
             const [shareCode, setShareCode] = useState("");
+            const [savedProfiles, setSavedProfiles] = useState([]);
 
-            // Load saved state (mh_pro_v3)
+            // 1. Initial Load of profiles
+            useEffect(() => {
+                // Try to fetch local JSON first (Repository Mode)
+                fetch('./mathhammer_data.json')
+                    .then(res => res.json())
+                    .then(data => {
+                        console.log("Loaded external profiles");
+                        setSavedProfiles(prev => [...prev, ...data]);
+                    })
+                    .catch(() => console.log("No external profiles found"));
+
+                // Then load local storage
+                const p = safeStorage.get('mh_pro_v3_profiles');
+                if(p) try { setSavedProfiles(prev => [...prev, ...JSON.parse(p)]); } catch(e){}
+            }, []);
+
+            // 2. Load State
             useEffect(() => { 
                 const p = safeStorage.get('mh_pro_v3'); 
                 if(p) {
@@ -502,13 +518,12 @@
                 } 
             }, []);
             
-            // Save state on change
+            // 3. Save State
             useEffect(() => { safeStorage.set('mh_pro_v3', JSON.stringify(state)); }, [state]);
 
-            // Run simulation
+            // 4. Run Sim
             useEffect(() => { setResults(runSimulation(state)); }, [state]);
 
-            // Updaters
             const updateDefender = (k, v) => setState(s => ({ ...s, defender: { ...s.defender, [k]: v } }));
             const updateGlobal = (k, v) => setState(s => ({ ...s, globalOptions: { ...s.globalOptions, [k]: v } }));
             const updateUnitPoints = (v) => setState(s => ({ ...s, unitPoints: v }));
@@ -523,8 +538,7 @@
             const copyProfile = (idx) => setState(s => ({ ...s, profiles: [...s.profiles, { ...s.profiles[idx], id: generateId(), name: `${s.profiles[idx].name} (Copy)` }] }));
 
             const handleImport = (data) => {
-                // Update Defender if stats found
-                if (data.defender.t || data.defender.sv || data.defender.w) {
+                if (data.defender.t || data.defender.sv) {
                     const def = { ...state.defender };
                     if (data.defender.t) def.toughness = data.defender.t;
                     if (data.defender.sv) def.save = data.defender.sv;
@@ -533,10 +547,7 @@
                     if (data.defender.fnp) def.fnp = data.defender.fnp;
                     setState(s => ({ ...s, defender: def }));
                 }
-                // Update Attacker Profiles if weapons found
-                if (data.weapons && data.weapons.length > 0) {
-                    setState(s => ({ ...s, profiles: data.weapons }));
-                }
+                if (data.weapons && data.weapons.length > 0) setState(s => ({ ...s, profiles: data.weapons }));
             };
 
             const resetAll = () => {
@@ -566,7 +577,7 @@
                             <button onClick={resetAll} className="px-3 py-2 bg-slate-800 rounded text-xs font-bold text-slate-400 flex items-center gap-1">{Icons.RotateCcw} RST</button>
                         </div>
                     </div>
-                    {showProfiles && <ProfileModal onClose={() => setShowProfiles(false)} onLoad={(saver, data) => saver ? saver(state) : setState(data)} />}
+                    {showProfiles && <ProfileModal onClose={() => setShowProfiles(false)} onLoad={(saver, data) => saver ? saver(state) : setState(data)} profiles={savedProfiles} setProfiles={setSavedProfiles} />}
                     {showImport && <ImportModal onClose={() => setShowImport(false)} onImport={handleImport} />}
                     {showShare && <ShareModal code={shareCode} onClose={() => setShowShare(false)} />}
 
