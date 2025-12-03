@@ -43,133 +43,200 @@
             hitRerollCap: 0, woundRerollCap: 0, critHitOnFive: false
         };
 
-        // --- Simulation Logic (Multi-Profile) ---
-        const runSimulation = (params) => {
-            const ITERATIONS = 3000;
-            const { profiles, defender, globalOptions } = params;
-            // Guard against undefined defender/options on first render
-            if (!defender || !globalOptions) return { avgDead: 0, wipeChance: 0, dist: [] };
+        const DEFAULT_STATE = {
+            unitPoints: 100,
+            profiles: [{ ...DEFAULT_PROFILE, id: 'default_1' }],
+            defender: { defenderModels: 5, toughness: 4, save: 3, invuln: 7, wounds: 1, fnp: 7 },
+            globalOptions: { defMinusHit: false, defMinusWound: false, defMinusDamage: false, defHalveDamage: false }
+        };
 
-            const { defenderModels, toughness, save, invuln, wounds, fnp } = defender;
-            const { defMinusHit, defMinusWound, defMinusDamage, defHalveDamage } = globalOptions;
+        // --- Parser Logic (NewRecruit/BattleScribe) ---
+        const parseWeaponString = (text) => {
+            const weapons = [];
+            const lines = text.split('\n');
+            
+            // Regex to find weapon stats: A, BS/WS, S, AP, D
+            // Matches formats like: "A2", "A D6+1", "BS 3+", "S4", "AP-1", "D2", "D D3"
+            const regex = /A\s*(\d+|D\d+(?:\+\d+)?).*?(?:BS|WS)\s*(\d+)\+.*?S\s*(\d+).*?AP\s*(-?\d+).*?D\s*(\d+|D\d+(?:\+\d+)?)/i;
 
-            const killCounts = new Array(defenderModels + 1).fill(0);
-            let totalDead = 0, totalDmg = 0, totalAtk = 0, totalHits = 0, totalWnds = 0, totalSavesFailed = 0;
-
-            const rollDie = (faces = 6) => Math.floor(Math.random() * faces) + 1;
-            const rollVal = (type, fixed, mod) => { if (type === 'fixed') return fixed; let r = (type === 'D3') ? Math.ceil(rollDie(6)/2) : rollDie(6); return Math.max(1, r + mod); };
-
-            for (let i = 0; i < ITERATIONS; i++) {
-                let deadModelsThisRun = 0;
-                let currentModelHealth = wounds;
-                let runDamage = 0;
-
-                // Iterate through all weapon profiles sequentially for this simulation phase
-                for (const prof of profiles) {
-                    const critThreshold = prof.critHitOnFive ? 5 : 6;
+            lines.forEach(line => {
+                const match = line.match(regex);
+                if (match) {
+                    const nameMatch = line.split(/[\[\-]/)[0].trim(); // Grab text before keywords or stats
+                    const name = nameMatch.length > 20 ? "Imported Weapon" : nameMatch || "Weapon";
                     
-                    // 1. Attacks
-                    let nAtk = 0;
-                    for(let m=0; m<prof.count; m++) nAtk += rollVal(prof.atkDice, prof.atkFixed, prof.atkMod);
-                    if (prof.blast) nAtk += Math.floor(defenderModels / 5); // Blast uses starting strength
-                    if (prof.rapidFire && prof.halfRange) nAtk += (prof.rapidFireVal * prof.count);
-                    totalAtk += nAtk;
-
-                    // 2. Hits
-                    let nHit = 0, nAuto = 0, nCrit = 0;
-                    if (prof.torrent) { nHit = nAtk; } else {
-                        for (let a=0; a<nAtk; a++) {
-                            let r = rollDie(6);
-                            if (r <= prof.hitRerollCap) r = rollDie(6);
-                            let mod = (prof.heavy ? 1 : 0) + (defMinusHit ? -1 : 0);
-                            mod = Math.max(-1, Math.min(1, mod));
-                            const isCrit = r >= critThreshold;
-                            const isHit = (r !== 1 && (r + mod) >= prof.bs) || r === 6;
-                            if (isCrit) { nCrit++; nHit++; if (prof.lethalHits) nAuto++; if (prof.sustainedHits > 0) nHit += prof.sustainedHits; } 
-                            else if (isHit) nHit++;
+                    // Parse Dice Values (e.g., "D6+1")
+                    const parseDice = (val) => {
+                        val = val.toUpperCase();
+                        let type = 'fixed', fixed = 0, mod = 0;
+                        if (val.includes('D')) {
+                            if (val.includes('D3')) type = 'D3';
+                            else if (val.includes('D6')) type = 'D6';
+                            
+                            const parts = val.split('+');
+                            if (parts[1]) mod = parseInt(parts[1]);
+                        } else {
+                            fixed = parseInt(val);
                         }
-                    }
-                    totalHits += nHit;
-
-                    // 3. Wounds
-                    let wPool = nHit - (prof.lethalHits ? nCrit : 0); 
-                    if (prof.torrent) wPool = nHit;
-                    
-                    let nWnd = 0, nCritWnd = 0;
-                    let wTgt = prof.strength >= toughness*2 ? 2 : prof.strength > toughness ? 3 : prof.strength === toughness ? 4 : prof.strength <= toughness/2 ? 6 : 5;
-                    const antiTgt = prof.anti < 7 ? prof.anti : 7;
-                    const rrWnd = prof.twinLinked ? 6 : prof.woundRerollCap;
-                    let wMod = (prof.lance ? 1 : 0) + (defMinusWound ? -1 : 0);
-                    wMod = Math.max(-1, Math.min(1, wMod));
-
-                    for(let w=0; w<wPool; w++) {
-                        let r = rollDie(6);
-                        if (r <= rrWnd) r = rollDie(6);
-                        const isCrit = r >= 6 || r >= antiTgt;
-                        const isSucc = (r !== 1 && (r + wMod) >= wTgt) || isCrit;
-                        if (isCrit) nCritWnd++; else if (isSucc) nWnd++;
-                    }
-
-                    let normalWnds = nWnd + nAuto;
-                    let mortalDice = 0;
-                    totalWnds += (normalWnds + nCritWnd);
-                    if (prof.devastatingWounds) { mortalDice = nCritWnd; } else { normalWnds += nCritWnd; }
-
-                    // 4. Saves
-                    let nUnsaved = 0;
-                    const svTgt = save + prof.ap;
-                    let bestSv = (invuln < 7 && invuln < svTgt) ? invuln : svTgt;
-                    for(let s=0; s<normalWnds; s++) { if (bestSv > 6) nUnsaved++; else { if (rollDie(6) < bestSv) nUnsaved++; } }
-                    totalSavesFailed += nUnsaved;
-
-                    // 5. Damage (Allocation)
-                    // We continue allocation against the shared deadModels/currentModelHealth state
-                    if (deadModelsThisRun >= defenderModels) continue; // Squad already wiped
-
-                    const getDmg = () => {
-                        let d = rollVal(prof.dmgDice, prof.dmgFixed, prof.dmgMod);
-                        if (prof.melta && prof.halfRange) d += prof.meltaVal;
-                        if (defHalveDamage) d = Math.ceil(d/2);
-                        if (defMinusDamage) d = Math.max(1, d-1);
-                        return d;
+                        return { type, fixed, mod };
                     };
 
-                    // Normal Dmg
-                    for(let d=0; d<nUnsaved; d++) {
-                        let val = getDmg();
-                        if(fnp < 7) { let real=0; for(let f=0;f<val;f++) if(rollDie(6)<fnp) real++; val=real; }
-                        runDamage += val;
-                        if (val > 0) {
-                            if (val >= currentModelHealth) { deadModelsThisRun++; currentModelHealth = wounds; } else { currentModelHealth -= val; }
+                    const atk = parseDice(match[1]);
+                    const bs = parseInt(match[2]);
+                    const s = parseInt(match[3]);
+                    const ap = Math.abs(parseInt(match[4])); // Ensure positive for slider (0-6) usually
+                    const dmg = parseDice(match[5]);
+
+                    // Keywords Detection
+                    const lowerLine = line.toLowerCase();
+                    const newWeapon = {
+                        ...DEFAULT_PROFILE,
+                        id: generateId(),
+                        name: name,
+                        atkDice: atk.type, atkFixed: atk.fixed || 1, atkMod: atk.mod,
+                        bs: bs, strength: s, ap: ap,
+                        dmgDice: dmg.type, dmgFixed: dmg.fixed || 1, dmgMod: dmg.mod,
+                        lethalHits: lowerLine.includes('lethal hits'),
+                        devastatingWounds: lowerLine.includes('devastating wounds'),
+                        sustainedHits: lowerLine.includes('sustained hits 1') ? 1 : 0, // Simplified parsing
+                        blast: lowerLine.includes('blast'),
+                        torrent: lowerLine.includes('torrent'),
+                        heavy: lowerLine.includes('heavy'),
+                        twinLinked: lowerLine.includes('twin-linked'),
+                        lance: lowerLine.includes('lance'),
+                        melta: lowerLine.includes('melta'),
+                        rapidFire: lowerLine.includes('rapid fire')
+                    };
+                    weapons.push(newWeapon);
+                }
+            });
+            return weapons;
+        };
+
+        // --- Simulation Logic ---
+        const runSimulation = (params) => {
+            try {
+                if (!params || !params.profiles || !params.defender) return { avgAtk: 0, avgHit: 0, avgWnd: 0, avgFail: 0, avgDmg: 0, avgDead: 0, wipeChance: 0, dist: [] };
+
+                const ITERATIONS = 3000;
+                const { profiles, defender, globalOptions } = params;
+                const { defenderModels, toughness, save, invuln, wounds, fnp } = defender;
+                const { defMinusHit, defMinusWound, defMinusDamage, defHalveDamage } = globalOptions;
+
+                const killCounts = new Array(defenderModels + 1).fill(0);
+                let totalDead = 0, totalDmg = 0, totalAtk = 0, totalHits = 0, totalWnds = 0, totalSavesFailed = 0;
+
+                const rollDie = (faces = 6) => Math.floor(Math.random() * faces) + 1;
+                const rollVal = (type, fixed, mod) => { if (type === 'fixed') return fixed; let r = (type === 'D3') ? Math.ceil(rollDie(6)/2) : rollDie(6); return Math.max(1, r + mod); };
+
+                for (let i = 0; i < ITERATIONS; i++) {
+                    let deadModelsThisRun = 0;
+                    let currentModelHealth = wounds;
+                    let runDamage = 0;
+
+                    for (const prof of profiles) {
+                        const critThreshold = prof.critHitOnFive ? 5 : 6;
+                        
+                        // 1. Attacks
+                        let nAtk = 0;
+                        for(let m=0; m<prof.count; m++) nAtk += rollVal(prof.atkDice, prof.atkFixed, prof.atkMod);
+                        if (prof.blast) nAtk += Math.floor(defenderModels / 5);
+                        if (prof.rapidFire && prof.halfRange) nAtk += (prof.rapidFireVal * prof.count);
+                        totalAtk += nAtk;
+
+                        // 2. Hits
+                        let nHit = 0, nAuto = 0, nCrit = 0;
+                        if (prof.torrent) { nHit = nAtk; } else {
+                            for (let a=0; a<nAtk; a++) {
+                                let r = rollDie(6);
+                                if (r <= prof.hitRerollCap) r = rollDie(6);
+                                let mod = (prof.heavy ? 1 : 0) + (defMinusHit ? -1 : 0);
+                                mod = Math.max(-1, Math.min(1, mod));
+                                const isCrit = r >= critThreshold;
+                                const isHit = (r !== 1 && (r + mod) >= prof.bs) || r === 6;
+                                if (isCrit) { nCrit++; nHit++; if (prof.lethalHits) nAuto++; if (prof.sustainedHits > 0) nHit += prof.sustainedHits; } 
+                                else if (isHit) nHit++;
+                            }
                         }
-                        if (deadModelsThisRun >= defenderModels) break;
+                        totalHits += nHit;
+
+                        // 3. Wounds
+                        let wPool = nHit - (prof.lethalHits ? nCrit : 0); 
+                        if (prof.torrent) wPool = nHit;
+                        let nWnd = 0, nCritWnd = 0;
+                        let wTgt = prof.strength >= toughness*2 ? 2 : prof.strength > toughness ? 3 : prof.strength === toughness ? 4 : prof.strength <= toughness/2 ? 6 : 5;
+                        const antiTgt = prof.anti < 7 ? prof.anti : 7;
+                        const rrWnd = prof.twinLinked ? 6 : prof.woundRerollCap;
+                        let wMod = (prof.lance ? 1 : 0) + (defMinusWound ? -1 : 0);
+                        wMod = Math.max(-1, Math.min(1, wMod));
+
+                        for(let w=0; w<wPool; w++) {
+                            let r = rollDie(6);
+                            if (r <= rrWnd) r = rollDie(6);
+                            const isCrit = r >= 6 || r >= antiTgt;
+                            const isSucc = (r !== 1 && (r + wMod) >= wTgt) || isCrit;
+                            if (isCrit) nCritWnd++; else if (isSucc) nWnd++;
+                        }
+
+                        let normalWnds = nWnd + nAuto;
+                        let mortalDice = 0;
+                        totalWnds += (normalWnds + nCritWnd);
+                        if (prof.devastatingWounds) { mortalDice = nCritWnd; } else { normalWnds += nCritWnd; }
+
+                        // 4. Saves
+                        let nUnsaved = 0;
+                        const svTgt = save + prof.ap;
+                        let bestSv = (invuln < 7 && invuln < svTgt) ? invuln : svTgt;
+                        for(let s=0; s<normalWnds; s++) { if (bestSv > 6) nUnsaved++; else { if (rollDie(6) < bestSv) nUnsaved++; } }
+                        totalSavesFailed += nUnsaved;
+
+                        // 5. Damage
+                        if (deadModelsThisRun >= defenderModels) continue;
+
+                        const getDmg = () => {
+                            let d = rollVal(prof.dmgDice, prof.dmgFixed, prof.dmgMod);
+                            if (prof.melta && prof.halfRange) d += prof.meltaVal;
+                            if (defHalveDamage) d = Math.ceil(d/2);
+                            if (defMinusDamage) d = Math.max(1, d-1);
+                            return d;
+                        };
+
+                        for(let d=0; d<nUnsaved; d++) {
+                            let val = getDmg();
+                            if(fnp < 7) { let real=0; for(let f=0;f<val;f++) if(rollDie(6)<fnp) real++; val=real; }
+                            runDamage += val;
+                            if (val > 0) { if (val >= currentModelHealth) { deadModelsThisRun++; currentModelHealth = wounds; } else { currentModelHealth -= val; } }
+                            if (deadModelsThisRun >= defenderModels) break;
+                        }
+
+                        let mVal = 0;
+                        for(let m=0; m<mortalDice; m++) mVal += getDmg();
+                        if(fnp < 7) { let real=0; for(let f=0;f<mVal;f++) if(rollDie(6)<fnp) real++; mVal=real; }
+                        runDamage += mVal;
+
+                        while (mVal > 0 && deadModelsThisRun < defenderModels) {
+                            if (mVal >= currentModelHealth) { mVal -= currentModelHealth; deadModelsThisRun++; currentModelHealth = wounds; } 
+                            else { currentModelHealth -= mVal; mVal = 0; }
+                        }
                     }
 
-                    // Mortal Dmg
-                    let mVal = 0;
-                    for(let m=0; m<mortalDice; m++) mVal += getDmg();
-                    if(fnp < 7) { let real=0; for(let f=0;f<mVal;f++) if(rollDie(6)<fnp) real++; mVal=real; }
-                    runDamage += mVal;
-
-                    while (mVal > 0 && deadModelsThisRun < defenderModels) {
-                        if (mVal >= currentModelHealth) { mVal -= currentModelHealth; deadModelsThisRun++; currentModelHealth = wounds; } 
-                        else { currentModelHealth -= mVal; mVal = 0; }
-                    }
+                    totalDmg += runDamage;
+                    const capped = Math.min(deadModelsThisRun, defenderModels);
+                    totalDead += capped;
+                    killCounts[capped]++;
                 }
 
-                totalDmg += runDamage;
-                const capped = Math.min(deadModelsThisRun, defenderModels);
-                totalDead += capped;
-                killCounts[capped]++;
-            }
+                const dist = [];
+                for(let m=1; m<=defenderModels; m++) {
+                    let sum = 0; for(let k=m; k<=defenderModels; k++) sum += killCounts[k];
+                    dist.push((sum/ITERATIONS)*100);
+                }
 
-            const dist = [];
-            for(let m=1; m<=defenderModels; m++) {
-                let sum = 0; for(let k=m; k<=defenderModels; k++) sum += killCounts[k];
-                dist.push((sum/ITERATIONS)*100);
+                return { avgAtk: totalAtk/ITERATIONS, avgHit: totalHits/ITERATIONS, avgWnd: totalWnds/ITERATIONS, avgFail: totalSavesFailed/ITERATIONS, avgDmg: totalDmg/ITERATIONS, avgDead: totalDead/ITERATIONS, wipeChance: dist.length > 0 ? dist[dist.length-1] : 0, dist: dist };
+            } catch (err) {
+                console.error("Sim error", err);
+                return { avgAtk: 0, avgHit: 0, avgWnd: 0, avgFail: 0, avgDmg: 0, avgDead: 0, wipeChance: 0, dist: [] };
             }
-
-            return { avgAtk: totalAtk/ITERATIONS, avgHit: totalHits/ITERATIONS, avgWnd: totalWnds/ITERATIONS, avgFail: totalSavesFailed/ITERATIONS, avgDmg: totalDmg/ITERATIONS, avgDead: totalDead/ITERATIONS, wipeChance: dist.length > 0 ? dist[dist.length-1] : 0, dist: dist };
         };
 
         // --- Icons ---
@@ -190,10 +257,11 @@
             Paste: <Icon p={<><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" /><rect x="8" y="2" width="8" height="4" rx="1" ry="1" /></>} />,
             Plus: <Icon p={<><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></>} />,
             Copy: <Icon p={<><rect x="9" y="9" width="13" height="13" rx="2" ry="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></>} />,
-            Trash: <Icon p={<><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></>} />
+            Trash: <Icon p={<><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></>} />,
+            Share: <Icon p={<><circle cx="18" cy="5" r="3" /><circle cx="6" cy="12" r="3" /><circle cx="18" cy="19" r="3" /><line x1="8.59" y1="13.51" x2="15.42" y2="17.49" /><line x1="15.41" y1="6.51" x2="8.59" y2="10.49" /></>} />
         };
 
-        // --- Basic Components ---
+        // --- Common Components ---
         const Card = ({ children, className = "" }) => <div className={`bg-slate-800 border border-slate-700 rounded-lg shadow-xl overflow-hidden ${className}`}>{children}</div>;
 
         const SmartInput = ({ value, onChange, min, max, className, placeholder }) => {
@@ -265,7 +333,7 @@
             </div>
         );
 
-        // --- Weapon Profile Card ---
+        // --- Weapon Profile Component ---
         const WeaponProfileCard = ({ profile, update, remove, copy, index, isSingle }) => {
             const up = (k, v) => update(index, k, v);
             return (
@@ -347,9 +415,9 @@
         const ProfileModal = ({ onClose, onLoad }) => {
             const [profiles, setProfiles] = useState([]);
             const [newProfileName, setNewProfileName] = useState("");
-            useEffect(() => { const saved = safeStorage.get('mh_pro_v2_profiles'); if (saved) try { setProfiles(JSON.parse(saved)); } catch(e){} }, []);
-            const saveProfile = (data) => { if(!newProfileName.trim()) return; const newP = [...profiles, { name: newProfileName, data }]; setProfiles(newP); safeStorage.set('mh_pro_v2_profiles', JSON.stringify(newP)); setNewProfileName(""); };
-            const deleteProfile = (idx) => { const newP = profiles.filter((_,i) => i !== idx); setProfiles(newP); safeStorage.set('mh_pro_v2_profiles', JSON.stringify(newP)); }
+            useEffect(() => { const saved = safeStorage.get('mh_pro_v3_profiles'); if (saved) try { setProfiles(JSON.parse(saved)); } catch(e){} }, []);
+            const saveProfile = (data) => { if(!newProfileName.trim()) return; const newP = [...profiles, { name: newProfileName, data }]; setProfiles(newP); safeStorage.set('mh_pro_v3_profiles', JSON.stringify(newP)); setNewProfileName(""); };
+            const deleteProfile = (idx) => { const newP = profiles.filter((_,i) => i !== idx); setProfiles(newP); safeStorage.set('mh_pro_v3_profiles', JSON.stringify(newP)); }
             return (
                 <Modal title="Profile Manager" onClose={onClose}>
                     <div className="flex gap-2 mb-6"><input type="text" value={newProfileName} onChange={(e) => setNewProfileName(e.target.value)} placeholder="Name..." className="flex-1 bg-slate-800 border border-slate-600 rounded p-2 text-white" /><button onClick={() => onLoad((data) => saveProfile(data))} className="bg-yellow-600 hover:bg-yellow-500 text-white font-bold px-4 rounded">Save</button></div>
@@ -361,42 +429,86 @@
         const ImportModal = ({ onClose, onImport }) => {
             const [text, setText] = useState("");
             const parseAndImport = () => {
+                // Check if text contains weapon profiles (look for A, BS/WS, S, AP, D pattern)
+                const weapons = parseWeaponString(text);
+                
+                // Parse Defender Stats (T, Sv, W, etc)
                 const parseVal = (regex) => { const m = text.match(regex); return m ? parseInt(m[1]) : null; };
                 const t = parseVal(/(?:T|Toughness)[\s:]*(\d+)/i);
                 const sv = parseVal(/(?:Sv|Save)[\s:]*(\d+)\+?/i);
                 const w = parseVal(/(?:W|Wounds)[\s:]*(\d+)/i);
                 const inv = parseVal(/(?:Inv|Invuln)[\s:]*(\d+)\+?/i) || parseVal(/(\d+)\+\+/);
                 const fnp = parseVal(/(?:FNP|Feel No Pain)[\s:]*(\d+)\+?/i) || parseVal(/(\d+)\+\+\+/);
-                onImport({ t, sv, w, inv, fnp });
+                
+                onImport({ 
+                    defender: { t, sv, w, inv, fnp },
+                    weapons: weapons.length > 0 ? weapons : null
+                });
                 onClose();
             };
             return (
                 <Modal title="Smart Paste" onClose={onClose}>
-                    <p className="text-xs text-slate-400 mb-2">Paste stat line (e.g. "T4 Sv3+ W2 4++")</p>
-                    <textarea value={text} onChange={e => setText(e.target.value)} className="w-full h-32 bg-slate-800 border border-slate-600 rounded p-2 text-white mb-4" placeholder="Paste stats here..." />
+                    <p className="text-xs text-slate-400 mb-2">Paste unit text from NewRecruit / BattleScribe:</p>
+                    <textarea value={text} onChange={e => setText(e.target.value)} className="w-full h-40 bg-slate-800 border border-slate-600 rounded p-2 text-white mb-4 text-xs font-mono" placeholder="Ex: Intercessor Squad... Bolt Rifle A2 BS3+ S4 AP-1 D1..." />
                     <button onClick={parseAndImport} className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold p-2 rounded">Import</button>
+                </Modal>
+            );
+        };
+
+        const ShareModal = ({ code, onClose }) => {
+            const [copied, setCopied] = useState(false);
+            const copyToClipboard = () => {
+                const el = document.createElement('textarea');
+                el.value = code;
+                document.body.appendChild(el);
+                el.select();
+                try {
+                    document.execCommand('copy');
+                    setCopied(true);
+                } catch (err) {
+                    console.error('Copy failed', err);
+                }
+                document.body.removeChild(el);
+                setTimeout(() => setCopied(false), 2000);
+            };
+            return (
+                <Modal title="Share Loadout" onClose={onClose}>
+                    <p className="text-sm text-slate-400 mb-2">Copy this code to share your setup:</p>
+                    <textarea readOnly value={code} className="w-full bg-slate-950 border border-slate-700 rounded p-3 text-xs font-mono text-slate-300 h-24 mb-4 break-all" />
+                    <button onClick={copyToClipboard} className={`w-full py-2 rounded font-bold ${copied ? 'bg-green-600 text-white' : 'bg-blue-600 text-blue-50'}`}>{copied ? "Copied!" : "Copy to Clipboard"}</button>
                 </Modal>
             );
         };
 
         // --- Main App ---
         function App() {
-            const [state, setState] = useState({
-                unitPoints: 100,
-                profiles: [{ ...DEFAULT_PROFILE, id: generateId() }],
-                defender: { defenderModels: 5, toughness: 4, save: 3, invuln: 7, wounds: 1, fnp: 7 },
-                globalOptions: { defMinusHit: false, defMinusWound: false, defMinusDamage: false, defHalveDamage: false }
-            });
-
+            const [state, setState] = useState(DEFAULT_STATE);
             const [results, setResults] = useState({ avgAtk: 0, avgHit: 0, avgWnd: 0, avgFail: 0, avgDmg: 0, avgDead: 0, wipeChance: 0, dist: [] });
             const [frozen, setFrozen] = useState(null);
             const [showProfiles, setShowProfiles] = useState(false);
             const [showImport, setShowImport] = useState(false);
+            const [showShare, setShowShare] = useState(false);
+            const [shareCode, setShareCode] = useState("");
 
-            useEffect(() => { const p = safeStorage.get('mh_pro_v2'); if(p) try { setState(JSON.parse(p)); } catch(e){} }, []);
-            useEffect(() => { safeStorage.set('mh_pro_v2', JSON.stringify(state)); }, [state]);
+            // Load saved state (mh_pro_v3)
+            useEffect(() => { 
+                const p = safeStorage.get('mh_pro_v3'); 
+                if(p) {
+                    try { 
+                        const parsed = JSON.parse(p);
+                        // Check if it's the new format
+                        if (parsed.profiles) setState(parsed); 
+                    } catch(e){} 
+                } 
+            }, []);
+            
+            // Save state on change
+            useEffect(() => { safeStorage.set('mh_pro_v3', JSON.stringify(state)); }, [state]);
+
+            // Run simulation
             useEffect(() => { setResults(runSimulation(state)); }, [state]);
 
+            // Updaters
             const updateDefender = (k, v) => setState(s => ({ ...s, defender: { ...s.defender, [k]: v } }));
             const updateGlobal = (k, v) => setState(s => ({ ...s, globalOptions: { ...s.globalOptions, [k]: v } }));
             const updateUnitPoints = (v) => setState(s => ({ ...s, unitPoints: v }));
@@ -411,23 +523,33 @@
             const copyProfile = (idx) => setState(s => ({ ...s, profiles: [...s.profiles, { ...s.profiles[idx], id: generateId(), name: `${s.profiles[idx].name} (Copy)` }] }));
 
             const handleImport = (data) => {
-                const def = { ...state.defender };
-                if (data.t) def.toughness = data.t;
-                if (data.sv) def.save = data.sv;
-                if (data.w) def.wounds = data.w;
-                if (data.inv) def.invuln = data.inv;
-                if (data.fnp) def.fnp = data.fnp;
-                setState(s => ({ ...s, defender: def }));
+                // Update Defender if stats found
+                if (data.defender.t || data.defender.sv || data.defender.w) {
+                    const def = { ...state.defender };
+                    if (data.defender.t) def.toughness = data.defender.t;
+                    if (data.defender.sv) def.save = data.defender.sv;
+                    if (data.defender.w) def.wounds = data.defender.w;
+                    if (data.defender.inv) def.invuln = data.defender.inv;
+                    if (data.defender.fnp) def.fnp = data.defender.fnp;
+                    setState(s => ({ ...s, defender: def }));
+                }
+                // Update Attacker Profiles if weapons found
+                if (data.weapons && data.weapons.length > 0) {
+                    setState(s => ({ ...s, profiles: data.weapons }));
+                }
             };
 
             const resetAll = () => {
-                setState({
-                    unitPoints: 100,
-                    profiles: [{ ...DEFAULT_PROFILE, id: generateId() }],
-                    defender: { defenderModels: 5, toughness: 4, save: 3, invuln: 7, wounds: 1, fnp: 7 },
-                    globalOptions: { defMinusHit: false, defMinusWound: false, defMinusDamage: false, defHalveDamage: false }
-                });
+                setState(DEFAULT_STATE);
                 setFrozen(null);
+            };
+
+            const handleShare = () => {
+                try {
+                    const code = btoa(JSON.stringify(state));
+                    setShareCode(code);
+                    setShowShare(true);
+                } catch(e) { console.error(e); }
             };
 
             const TARGETS = [{ label: "Target...", t: 4, sv: 3, inv: 7, w: 1, fnp: 7 }, { label: "MEQ", t: 4, sv: 3, inv: 7, w: 2, fnp: 7 }, { label: "TEQ", t: 5, sv: 2, inv: 4, w: 3, fnp: 7 }, { label: "Rhino", t: 9, sv: 3, inv: 7, w: 10, fnp: 7 }, { label: "Knight", t: 12, sv: 3, inv: 5, w: 22, fnp: 6 }];
@@ -439,12 +561,14 @@
                         <div className="flex items-center gap-2"><div className="bg-yellow-500 p-2 rounded text-slate-900">{Icons.Crosshair}</div><div><h1 className="text-xl font-black uppercase text-white">MathHammer Pro</h1></div></div>
                         <div className="flex gap-2">
                             <button onClick={() => setShowProfiles(!showProfiles)} className="px-3 py-2 bg-blue-900 rounded text-xs font-bold text-blue-100 flex items-center gap-1">{Icons.Save} LOAD</button>
+                            <button onClick={handleShare} className="px-3 py-2 bg-slate-800 rounded text-xs font-bold text-slate-300 flex items-center gap-1">{Icons.Share} SHARE</button>
                             <button onClick={() => frozen ? setFrozen(null) : setFrozen(results)} className={`px-3 py-2 rounded text-xs font-bold flex items-center gap-1 ${frozen ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-400'}`}>{Icons.Snow} CMP</button>
                             <button onClick={resetAll} className="px-3 py-2 bg-slate-800 rounded text-xs font-bold text-slate-400 flex items-center gap-1">{Icons.RotateCcw} RST</button>
                         </div>
                     </div>
                     {showProfiles && <ProfileModal onClose={() => setShowProfiles(false)} onLoad={(saver, data) => saver ? saver(state) : setState(data)} />}
                     {showImport && <ImportModal onClose={() => setShowImport(false)} onImport={handleImport} />}
+                    {showShare && <ShareModal code={shareCode} onClose={() => setShowShare(false)} />}
 
                     <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
                         <div className="lg:col-span-7 space-y-4">
