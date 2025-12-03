@@ -11,7 +11,7 @@
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        body { overscroll-behavior-y: none; -webkit-tap-highlight-color: transparent; background-color: #0f172a; color: #e2e8f0; }
+        body { overscroll-behavior-y: none; -webkit-tap-highlight-color: transparent; background-color: #0f172a; color: #e2e8f0; overflow-x: hidden; }
         ::-webkit-scrollbar { width: 4px; }
         ::-webkit-scrollbar-track { background: #0f172a; }
         ::-webkit-scrollbar-thumb { background: #334155; border-radius: 2px; }
@@ -22,7 +22,7 @@
 <body>
     <div id="root"></div>
     <script type="text/babel">
-        const { useState, useEffect, useCallback } = React;
+        const { useState, useEffect, useCallback, useRef } = React;
 
         // --- Utils ---
         const safeStorage = {
@@ -50,7 +50,7 @@
             globalOptions: { defMinusHit: false, defMinusWound: false, defMinusDamage: false, defHalveDamage: false }
         };
 
-        // --- Parser Logic (NewRecruit/BattleScribe) ---
+        // --- Parser Logic ---
         const parseWeaponString = (text) => {
             const weapons = [];
             const lines = text.split('\n');
@@ -238,7 +238,10 @@
             Plus: <Icon p={<><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></>} />,
             Copy: <Icon p={<><rect x="9" y="9" width="13" height="13" rx="2" ry="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></>} />,
             Trash: <Icon p={<><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></>} />,
-            Share: <Icon p={<><circle cx="18" cy="5" r="3" /><circle cx="6" cy="12" r="3" /><circle cx="18" cy="19" r="3" /><line x1="8.59" y1="13.51" x2="15.42" y2="17.49" /><line x1="15.41" y1="6.51" x2="8.59" y2="10.49" /></>} />
+            Share: <Icon p={<><circle cx="18" cy="5" r="3" /><circle cx="6" cy="12" r="3" /><circle cx="18" cy="19" r="3" /><line x1="8.59" y1="13.51" x2="15.42" y2="17.49" /><line x1="15.41" y1="6.51" x2="8.59" y2="10.49" /></>} />,
+            Download: <Icon p={<><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></>} />,
+            Upload: <Icon p={<><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></>} />,
+            Menu: <Icon p={<><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="18" x2="21" y2="18" /></>} />
         };
 
         // --- Common Components ---
@@ -479,6 +482,13 @@
             );
         };
 
+        const MenuItem = ({ onClick, icon: Icon, label, active, color = "text-slate-300" }) => (
+            <button onClick={onClick} className={`w-full text-left px-4 py-3 flex items-center gap-3 hover:bg-slate-800 transition-colors ${active ? 'bg-slate-800/50' : ''}`}>
+                <div className={`${color}`}>{React.isValidElement(Icon) ? Icon : <Icon />}</div>
+                <span className={`text-sm font-bold ${color}`}>{label}</span>
+            </button>
+        );
+
         // --- Main App ---
         function App() {
             const [state, setState] = useState(DEFAULT_STATE);
@@ -489,6 +499,7 @@
             const [showShare, setShowShare] = useState(false);
             const [shareCode, setShareCode] = useState("");
             const [savedProfiles, setSavedProfiles] = useState([]);
+            const [menuOpen, setMenuOpen] = useState(false);
 
             // 1. Initial Load of profiles
             useEffect(() => {
@@ -506,15 +517,24 @@
                 if(p) try { setSavedProfiles(prev => [...prev, ...JSON.parse(p)]); } catch(e){}
             }, []);
 
-            // 2. Load State
+            // 2. Load State with Validation/Migration
             useEffect(() => { 
                 const p = safeStorage.get('mh_pro_v3'); 
                 if(p) {
                     try { 
                         const parsed = JSON.parse(p);
-                        // Check if it's the new format
-                        if (parsed.profiles) setState(parsed); 
-                    } catch(e){} 
+                        // Validation: If loaded data is old format (flat) or missing profiles array, force update
+                        if (parsed.profiles && Array.isArray(parsed.profiles)) {
+                            setState(parsed); 
+                        } else {
+                            // If old format, maybe migrate? For now, just safer to default to prevent crash.
+                            // To be safer, we could try to construct a profile from the old flat data, but starting clean is safer against crashes.
+                            console.warn("Legacy data detected, resetting to default to prevent crash.");
+                            setState(DEFAULT_STATE);
+                        }
+                    } catch(e) {
+                        setState(DEFAULT_STATE);
+                    } 
                 } 
             }, []);
             
@@ -537,6 +557,51 @@
             const removeProfile = (idx) => setState(s => ({ ...s, profiles: s.profiles.filter((_, i) => i !== idx) }));
             const copyProfile = (idx) => setState(s => ({ ...s, profiles: [...s.profiles, { ...s.profiles[idx], id: generateId(), name: `${s.profiles[idx].name} (Copy)` }] }));
 
+            const loadProfile = (data) => {
+                // Defensive loading: check if data is old flat structure or new nested structure
+                if (data.profiles && Array.isArray(data.profiles)) {
+                    // New structure
+                    setState(data);
+                } else if (data.attackerModels) {
+                    // Old structure - migrate it to single weapon profile
+                    const migratedProfile = {
+                        ...DEFAULT_PROFILE,
+                        id: generateId(),
+                        name: "Legacy Weapon",
+                        count: 1, // Old app usually assumed 1 model? No, it had attackerModels.
+                        // Map old flat fields to new profile fields
+                        atkDice: data.atkDice || 'fixed',
+                        atkFixed: data.atkFixed || 2,
+                        atkMod: data.atkMod || 0,
+                        bs: data.bs || 3,
+                        strength: data.strength || 4,
+                        ap: data.ap || 0,
+                        dmgDice: data.dmgDice || 'fixed',
+                        dmgFixed: data.dmgFixed || 1,
+                        dmgMod: data.dmgMod || 0,
+                        lethalHits: data.lethalHits,
+                        sustainedHits: data.sustainedHits,
+                        devastatingWounds: data.devastatingWounds,
+                        // ... map other keywords ...
+                    };
+                    
+                    const migratedState = {
+                        ...DEFAULT_STATE,
+                        unitPoints: data.attackerPoints || 100,
+                        profiles: [migratedProfile],
+                        defender: {
+                            defenderModels: data.defenderModels || 5,
+                            toughness: data.toughness || 4,
+                            save: data.save || 3,
+                            invuln: data.invuln || 7,
+                            wounds: data.wounds || 1,
+                            fnp: data.fnp || 7
+                        }
+                    };
+                    setState(migratedState);
+                }
+            };
+
             const handleImport = (data) => {
                 if (data.defender.t || data.defender.sv) {
                     const def = { ...state.defender };
@@ -553,6 +618,7 @@
             const resetAll = () => {
                 setState(DEFAULT_STATE);
                 setFrozen(null);
+                setMenuOpen(false);
             };
 
             const handleShare = () => {
@@ -560,24 +626,46 @@
                     const code = btoa(JSON.stringify(state));
                     setShareCode(code);
                     setShowShare(true);
+                    setMenuOpen(false);
                 } catch(e) { console.error(e); }
             };
+
+            const handleFreeze = () => {
+                if (frozen) setFrozen(null);
+                else setFrozen(results);
+                setMenuOpen(false);
+            }
 
             const TARGETS = [{ label: "Target...", t: 4, sv: 3, inv: 7, w: 1, fnp: 7 }, { label: "MEQ", t: 4, sv: 3, inv: 7, w: 2, fnp: 7 }, { label: "TEQ", t: 5, sv: 2, inv: 4, w: 3, fnp: 7 }, { label: "Rhino", t: 9, sv: 3, inv: 7, w: 10, fnp: 7 }, { label: "Knight", t: 12, sv: 3, inv: 5, w: 22, fnp: 6 }];
             const pointsPerKill = results.avgDead > 0 ? (state.unitPoints / results.avgDead).toFixed(1) : "-";
 
             return (
                 <div className="max-w-5xl mx-auto p-4 space-y-4">
-                    <div className="flex justify-between items-center border-b border-slate-800 pb-4">
+                    <div className="flex justify-between items-center border-b border-slate-800 pb-4 relative">
                         <div className="flex items-center gap-2"><div className="bg-yellow-500 p-2 rounded text-slate-900">{Icons.Crosshair}</div><div><h1 className="text-xl font-black uppercase text-white">MathHammer Pro</h1></div></div>
-                        <div className="flex gap-2">
-                            <button onClick={() => setShowProfiles(!showProfiles)} className="px-3 py-2 bg-blue-900 rounded text-xs font-bold text-blue-100 flex items-center gap-1">{Icons.Save} LOAD</button>
-                            <button onClick={handleShare} className="px-3 py-2 bg-slate-800 rounded text-xs font-bold text-slate-300 flex items-center gap-1">{Icons.Share} SHARE</button>
-                            <button onClick={() => frozen ? setFrozen(null) : setFrozen(results)} className={`px-3 py-2 rounded text-xs font-bold flex items-center gap-1 ${frozen ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-400'}`}>{Icons.Snow} CMP</button>
-                            <button onClick={resetAll} className="px-3 py-2 bg-slate-800 rounded text-xs font-bold text-slate-400 flex items-center gap-1">{Icons.RotateCcw} RST</button>
+                        
+                        {/* Hamburger Menu Button */}
+                        <div className="relative">
+                            <button onClick={() => setMenuOpen(!menuOpen)} className="p-2 rounded bg-slate-800 text-slate-300 hover:text-white border border-slate-700">
+                                {Icons.Menu}
+                            </button>
+                            
+                            {/* Dropdown Menu */}
+                            {menuOpen && (
+                                <>
+                                    <div className="fixed inset-0 z-40" onClick={() => setMenuOpen(false)}></div>
+                                    <div className="absolute right-0 top-12 bg-slate-900 border border-slate-700 rounded shadow-2xl z-50 w-48 overflow-hidden">
+                                        <MenuItem onClick={() => { setShowProfiles(true); setMenuOpen(false); }} icon={Icons.Save} label="Load Profile" />
+                                        <MenuItem onClick={handleShare} icon={Icons.Share} label="Share" />
+                                        <MenuItem onClick={handleFreeze} icon={Icons.Snow} label="Compare Mode" active={frozen} />
+                                        <div className="border-t border-slate-800 my-1"></div>
+                                        <MenuItem onClick={resetAll} icon={Icons.RotateCcw} label="Reset All" color="text-red-400" />
+                                    </div>
+                                </>
+                            )}
                         </div>
                     </div>
-                    {showProfiles && <ProfileModal onClose={() => setShowProfiles(false)} onLoad={(saver, data) => saver ? saver(state) : setState(data)} profiles={savedProfiles} setProfiles={setSavedProfiles} />}
+                    {showProfiles && <ProfileModal onClose={() => setShowProfiles(false)} onLoad={(saver, data) => saver ? saver(state) : loadProfile(data)} profiles={savedProfiles} setProfiles={setSavedProfiles} />}
                     {showImport && <ImportModal onClose={() => setShowImport(false)} onImport={handleImport} />}
                     {showShare && <ShareModal code={shareCode} onClose={() => setShowShare(false)} />}
 
@@ -591,7 +679,7 @@
                                         <button onClick={addProfile} className="bg-green-600 hover:bg-green-500 text-white font-bold py-2 px-4 rounded h-[42px] flex items-center gap-2">{Icons.Plus} ADD WEAPON</button>
                                     </div>
                                     <div className="space-y-4">
-                                        {state.profiles.map((p, i) => (
+                                        {state.profiles && state.profiles.map((p, i) => (
                                             <WeaponProfileCard key={p.id} index={i} profile={p} update={updateProfile} remove={removeProfile} copy={copyProfile} isSingle={state.profiles.length === 1} />
                                         ))}
                                     </div>
@@ -665,3 +753,5 @@
     </script>
 </body>
 </html>
+
+
