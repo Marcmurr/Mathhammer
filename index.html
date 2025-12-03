@@ -2,196 +2,177 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>MathHammer 40k Pro</title>
-    
-    <!-- iOS Settings -->
     <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <meta name="apple-mobile-web-app-title" content="MathHammer">
-
-    <!-- Android Settings -->
-    <meta name="mobile-web-app-capable" content="yes">
     <meta name="theme-color" content="#0f172a">
-
-    <!-- Libraries -->
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
-    
     <style>
-        /* Lock viewport to prevent sliding */
-        html, body { 
-            overflow-x: hidden; 
-            width: 100%; 
-            overscroll-behavior-y: none; 
-            -webkit-tap-highlight-color: transparent; 
-            background-color: #0f172a; 
-            color: #e2e8f0; 
-        }
-        /* Custom Scrollbar */
+        body { overscroll-behavior-y: none; -webkit-tap-highlight-color: transparent; background-color: #0f172a; color: #e2e8f0; }
         ::-webkit-scrollbar { width: 4px; }
         ::-webkit-scrollbar-track { background: #0f172a; }
         ::-webkit-scrollbar-thumb { background: #334155; border-radius: 2px; }
-        /* Hide number spinners */
-        input[type=number]::-webkit-inner-spin-button, 
-        input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+        input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
         .range-sm { height: 4px; }
     </style>
 </head>
 <body>
     <div id="root"></div>
-
     <script type="text/babel">
         const { useState, useEffect, useCallback } = React;
 
-        // --- 1. Safe Storage ---
+        // --- Utils ---
         const safeStorage = {
             get: (key) => { try { return localStorage.getItem(key); } catch (e) { return null; } },
             set: (key, value) => { try { localStorage.setItem(key, value); } catch (e) { } }
         };
+        const generateId = () => Math.random().toString(36).substr(2, 9);
 
-        // --- 2. Simulation Logic ---
+        // --- Defaults ---
+        const DEFAULT_PROFILE = {
+            id: 'init', name: 'Weapon 1', count: 5,
+            atkDice: 'fixed', atkFixed: 2, atkMod: 0,
+            bs: 3, strength: 4, ap: 0,
+            dmgDice: 'fixed', dmgFixed: 1, dmgMod: 0,
+            lethalHits: false, sustainedHits: 0, devastatingWounds: false, anti: 7, 
+            blast: false, torrent: false, melta: false, meltaVal: 2,
+            heavy: false, lance: false, twinLinked: false, rapidFire: false, rapidFireVal: 1, halfRange: false,
+            hitRerollCap: 0, woundRerollCap: 0, critHitOnFive: false
+        };
+
+        // --- Simulation Logic (Multi-Profile) ---
         const runSimulation = (params) => {
             const ITERATIONS = 3000;
-            const { 
-                attackerModels = 5, atkDice = 'fixed', atkFixed = 2, atkMod = 0,
-                bs = 3, strength = 4, ap = 0, dmgDice = 'fixed', dmgFixed = 1, dmgMod = 0,
-                lethalHits, sustainedHits = 0, devastatingWounds, anti = 7, blast, torrent, melta, meltaVal = 2,
-                heavy, lance, twinLinked, rapidFire, rapidFireVal = 1, halfRange,
-                hitRerollCap = 0, woundRerollCap = 0, critHitOnFive,
-                defenderModels = 5, toughness = 4, save = 3, invuln = 7, wounds = 1, fnp = 7,
-                defMinusHit, defMinusWound, defMinusDamage, defHalveDamage
-            } = params;
+            const { profiles, defender, globalOptions } = params;
+            // Guard against undefined defender/options on first render
+            if (!defender || !globalOptions) return { avgDead: 0, wipeChance: 0, dist: [] };
+
+            const { defenderModels, toughness, save, invuln, wounds, fnp } = defender;
+            const { defMinusHit, defMinusWound, defMinusDamage, defHalveDamage } = globalOptions;
 
             const killCounts = new Array(defenderModels + 1).fill(0);
             let totalDead = 0, totalDmg = 0, totalAtk = 0, totalHits = 0, totalWnds = 0, totalSavesFailed = 0;
 
             const rollDie = (faces = 6) => Math.floor(Math.random() * faces) + 1;
-            const rollVal = (type, fixed, mod) => {
-                if (type === 'fixed') return fixed;
-                let r = (type === 'D3') ? Math.ceil(rollDie(6)/2) : rollDie(6);
-                return Math.max(1, r + mod);
-            };
-
-            const critThreshold = critHitOnFive ? 5 : 6;
+            const rollVal = (type, fixed, mod) => { if (type === 'fixed') return fixed; let r = (type === 'D3') ? Math.ceil(rollDie(6)/2) : rollDie(6); return Math.max(1, r + mod); };
 
             for (let i = 0; i < ITERATIONS; i++) {
-                // Attacks
-                let nAtk = 0;
-                for(let m=0; m<attackerModels; m++) nAtk += rollVal(atkDice, atkFixed, atkMod);
-                if (blast) nAtk += Math.floor(defenderModels / 5);
-                if (rapidFire && halfRange) nAtk += (rapidFireVal * attackerModels);
-                totalAtk += nAtk;
+                let deadModelsThisRun = 0;
+                let currentModelHealth = wounds;
+                let runDamage = 0;
 
-                // Hits
-                let nHit = 0, nAuto = 0, nCrit = 0;
-                if (torrent) { nHit = nAtk; } else {
-                    for (let a=0; a<nAtk; a++) {
+                // Iterate through all weapon profiles sequentially for this simulation phase
+                for (const prof of profiles) {
+                    const critThreshold = prof.critHitOnFive ? 5 : 6;
+                    
+                    // 1. Attacks
+                    let nAtk = 0;
+                    for(let m=0; m<prof.count; m++) nAtk += rollVal(prof.atkDice, prof.atkFixed, prof.atkMod);
+                    if (prof.blast) nAtk += Math.floor(defenderModels / 5); // Blast uses starting strength
+                    if (prof.rapidFire && prof.halfRange) nAtk += (prof.rapidFireVal * prof.count);
+                    totalAtk += nAtk;
+
+                    // 2. Hits
+                    let nHit = 0, nAuto = 0, nCrit = 0;
+                    if (prof.torrent) { nHit = nAtk; } else {
+                        for (let a=0; a<nAtk; a++) {
+                            let r = rollDie(6);
+                            if (r <= prof.hitRerollCap) r = rollDie(6);
+                            let mod = (prof.heavy ? 1 : 0) + (defMinusHit ? -1 : 0);
+                            mod = Math.max(-1, Math.min(1, mod));
+                            const isCrit = r >= critThreshold;
+                            const isHit = (r !== 1 && (r + mod) >= prof.bs) || r === 6;
+                            if (isCrit) { nCrit++; nHit++; if (prof.lethalHits) nAuto++; if (prof.sustainedHits > 0) nHit += prof.sustainedHits; } 
+                            else if (isHit) nHit++;
+                        }
+                    }
+                    totalHits += nHit;
+
+                    // 3. Wounds
+                    let wPool = nHit - (prof.lethalHits ? nCrit : 0); 
+                    if (prof.torrent) wPool = nHit;
+                    
+                    let nWnd = 0, nCritWnd = 0;
+                    let wTgt = prof.strength >= toughness*2 ? 2 : prof.strength > toughness ? 3 : prof.strength === toughness ? 4 : prof.strength <= toughness/2 ? 6 : 5;
+                    const antiTgt = prof.anti < 7 ? prof.anti : 7;
+                    const rrWnd = prof.twinLinked ? 6 : prof.woundRerollCap;
+                    let wMod = (prof.lance ? 1 : 0) + (defMinusWound ? -1 : 0);
+                    wMod = Math.max(-1, Math.min(1, wMod));
+
+                    for(let w=0; w<wPool; w++) {
                         let r = rollDie(6);
-                        if (r <= hitRerollCap) r = rollDie(6);
-                        
-                        let mod = (heavy ? 1 : 0) + (defMinusHit ? -1 : 0);
-                        mod = Math.max(-1, Math.min(1, mod));
-                        
-                        const isCrit = r >= critThreshold;
-                        const isHit = (r !== 1 && (r + mod) >= bs) || r === 6;
+                        if (r <= rrWnd) r = rollDie(6);
+                        const isCrit = r >= 6 || r >= antiTgt;
+                        const isSucc = (r !== 1 && (r + wMod) >= wTgt) || isCrit;
+                        if (isCrit) nCritWnd++; else if (isSucc) nWnd++;
+                    }
 
-                        if (isCrit) {
-                            nCrit++; nHit++;
-                            if (lethalHits) nAuto++;
-                            if (sustainedHits > 0) nHit += sustainedHits;
-                        } else if (isHit) nHit++;
+                    let normalWnds = nWnd + nAuto;
+                    let mortalDice = 0;
+                    totalWnds += (normalWnds + nCritWnd);
+                    if (prof.devastatingWounds) { mortalDice = nCritWnd; } else { normalWnds += nCritWnd; }
+
+                    // 4. Saves
+                    let nUnsaved = 0;
+                    const svTgt = save + prof.ap;
+                    let bestSv = (invuln < 7 && invuln < svTgt) ? invuln : svTgt;
+                    for(let s=0; s<normalWnds; s++) { if (bestSv > 6) nUnsaved++; else { if (rollDie(6) < bestSv) nUnsaved++; } }
+                    totalSavesFailed += nUnsaved;
+
+                    // 5. Damage (Allocation)
+                    // We continue allocation against the shared deadModels/currentModelHealth state
+                    if (deadModelsThisRun >= defenderModels) continue; // Squad already wiped
+
+                    const getDmg = () => {
+                        let d = rollVal(prof.dmgDice, prof.dmgFixed, prof.dmgMod);
+                        if (prof.melta && prof.halfRange) d += prof.meltaVal;
+                        if (defHalveDamage) d = Math.ceil(d/2);
+                        if (defMinusDamage) d = Math.max(1, d-1);
+                        return d;
+                    };
+
+                    // Normal Dmg
+                    for(let d=0; d<nUnsaved; d++) {
+                        let val = getDmg();
+                        if(fnp < 7) { let real=0; for(let f=0;f<val;f++) if(rollDie(6)<fnp) real++; val=real; }
+                        runDamage += val;
+                        if (val > 0) {
+                            if (val >= currentModelHealth) { deadModelsThisRun++; currentModelHealth = wounds; } else { currentModelHealth -= val; }
+                        }
+                        if (deadModelsThisRun >= defenderModels) break;
+                    }
+
+                    // Mortal Dmg
+                    let mVal = 0;
+                    for(let m=0; m<mortalDice; m++) mVal += getDmg();
+                    if(fnp < 7) { let real=0; for(let f=0;f<mVal;f++) if(rollDie(6)<fnp) real++; mVal=real; }
+                    runDamage += mVal;
+
+                    while (mVal > 0 && deadModelsThisRun < defenderModels) {
+                        if (mVal >= currentModelHealth) { mVal -= currentModelHealth; deadModelsThisRun++; currentModelHealth = wounds; } 
+                        else { currentModelHealth -= mVal; mVal = 0; }
                     }
                 }
-                totalHits += nHit;
 
-                // Wounds
-                let wPool = nHit - (lethalHits ? nCrit : 0);
-                if (torrent) wPool = nHit;
-                let nWnd = 0, nCritWnd = 0;
-                let wTgt = strength >= toughness*2 ? 2 : strength > toughness ? 3 : strength === toughness ? 4 : strength <= toughness/2 ? 6 : 5;
-                const antiTgt = anti < 7 ? anti : 7;
-                const rrWnd = twinLinked ? 6 : woundRerollCap;
-                let wMod = (lance ? 1 : 0) + (defMinusWound ? -1 : 0);
-                wMod = Math.max(-1, Math.min(1, wMod));
-
-                for(let w=0; w<wPool; w++) {
-                    let r = rollDie(6);
-                    if (r <= rrWnd) r = rollDie(6);
-                    const isCrit = r >= 6 || r >= antiTgt;
-                    const isSucc = (r !== 1 && (r + wMod) >= wTgt) || isCrit;
-                    if (isCrit) nCritWnd++; else if (isSucc) nWnd++;
-                }
-
-                let normalWnds = nWnd + nAuto;
-                let mortalDice = 0;
-                totalWnds += (normalWnds + nCritWnd);
-                if (devastatingWounds) { mortalDice = nCritWnd; } else { normalWnds += nCritWnd; }
-
-                // Saves
-                let nUnsaved = 0;
-                const svTgt = save + ap;
-                let bestSv = (invuln < 7 && invuln < svTgt) ? invuln : svTgt;
-                for(let s=0; s<normalWnds; s++) {
-                    if (bestSv > 6) nUnsaved++; else { if (rollDie(6) < bestSv) nUnsaved++; }
-                }
-                totalSavesFailed += nUnsaved;
-
-                // Damage
-                let dead = 0, curHP = wounds, runDmg = 0;
-                const getDmg = () => {
-                    let d = rollVal(dmgDice, dmgFixed, dmgMod);
-                    if (melta && halfRange) d += meltaVal;
-                    if (defHalveDamage) d = Math.ceil(d/2);
-                    if (defMinusDamage) d = Math.max(1, d-1);
-                    return d;
-                };
-
-                for(let d=0; d<nUnsaved; d++) {
-                    let val = getDmg();
-                    if(fnp < 7) { let real=0; for(let f=0;f<val;f++) if(rollDie(6)<fnp) real++; val=real; }
-                    runDmg += val;
-                    if (val > 0) { if (val >= curHP) { dead++; curHP = wounds; } else { curHP -= val; } }
-                    if (dead >= defenderModels) break;
-                }
-
-                let mVal = 0;
-                for(let m=0; m<mortalDice; m++) mVal += getDmg();
-                if(fnp < 7) { let real=0; for(let f=0;f<mVal;f++) if(rollDie(6)<fnp) real++; mVal=real; }
-                runDmg += mVal;
-
-                while (mVal > 0 && dead < defenderModels) {
-                    if (mVal >= curHP) { mVal -= curHP; dead++; curHP = wounds; } else { curHP -= mVal; mVal = 0; }
-                }
-
-                totalDmg += runDmg;
-                const capped = Math.min(dead, defenderModels);
+                totalDmg += runDamage;
+                const capped = Math.min(deadModelsThisRun, defenderModels);
                 totalDead += capped;
                 killCounts[capped]++;
             }
 
             const dist = [];
             for(let m=1; m<=defenderModels; m++) {
-                let sum = 0;
-                for(let k=m; k<=defenderModels; k++) sum += killCounts[k];
+                let sum = 0; for(let k=m; k<=defenderModels; k++) sum += killCounts[k];
                 dist.push((sum/ITERATIONS)*100);
             }
 
-            return {
-                avgAtk: totalAtk/ITERATIONS,
-                avgHit: totalHits/ITERATIONS,
-                avgWnd: totalWnds/ITERATIONS,
-                avgFail: totalSavesFailed/ITERATIONS,
-                avgDmg: totalDmg/ITERATIONS,
-                avgDead: totalDead/ITERATIONS,
-                wipeChance: dist.length > 0 ? dist[dist.length-1] : 0,
-                dist: dist
-            };
+            return { avgAtk: totalAtk/ITERATIONS, avgHit: totalHits/ITERATIONS, avgWnd: totalWnds/ITERATIONS, avgFail: totalSavesFailed/ITERATIONS, avgDmg: totalDmg/ITERATIONS, avgDead: totalDead/ITERATIONS, wipeChance: dist.length > 0 ? dist[dist.length-1] : 0, dist: dist };
         };
 
-        // --- 3. UI Components ---
+        // --- Icons ---
         const Icon = ({ p, c }) => <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={c}>{p}</svg>;
         const Icons = {
             Sword: <Icon p={<><path d="M14.5 17.5L3 6V3h3l11.5 11.5" /><path d="M13 19l6-6" /><path d="M16 16l4 4" /><path d="M19 21l2-2" /></>} />,
@@ -206,45 +187,37 @@
             Coins: <Icon p={<><circle cx="8" cy="8" r="6" /><path d="M18.09 10.37A6 6 0 1 1 10.34 18" /><path d="M7 6h1v4" /><path d="M17.12 10.06C17.7 10.63 18 11.27 18 12c0 1.66-1.34 3-3 3-1.66 0-3-1.34-3-3 0-.73.3-1.37.88-1.94" /></>} />,
             Flame: <Icon p={<><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-2.072-2.143-3.072-2.143-.326 0-.61.07-.81.21.314-1.352 1.543-2.068 1.543-2.068A6.002 6.002 0 0 1 13 11a4 4 0 0 0-3.5 6.5" /><path d="M12.982 5.626c1.654.589 2.018 2.374 2.018 2.374 0 1.25.5 2 1 3 .667 1.333 1.333 1.333 2 1.333.667 0 1.333-.667 2-2 .5 2 1.292 2.91 1 4.5A5 5 0 0 1 12 19c-1.38 0-2.5-.5-3.5-1.5" /></>} />,
             Chart: <Icon p={<><path d="M3 3v18h18" /><path d="M18 17V9" /><path d="M13 17V5" /><path d="M8 17v-3" /></>} />,
-            Share: <Icon p={<><circle cx="18" cy="5" r="3" /><circle cx="6" cy="12" r="3" /><circle cx="18" cy="19" r="3" /><line x1="8.59" y1="13.51" x2="15.42" y2="17.49" /><line x1="15.41" y1="6.51" x2="8.59" y2="10.49" /></>} />,
-            Paste: <Icon p={<><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" /><rect x="8" y="2" width="8" height="4" rx="1" ry="1" /></>} />
+            Paste: <Icon p={<><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" /><rect x="8" y="2" width="8" height="4" rx="1" ry="1" /></>} />,
+            Plus: <Icon p={<><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></>} />,
+            Copy: <Icon p={<><rect x="9" y="9" width="13" height="13" rx="2" ry="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></>} />,
+            Trash: <Icon p={<><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></>} />
         };
+
+        // --- Basic Components ---
+        const Card = ({ children, className = "" }) => <div className={`bg-slate-800 border border-slate-700 rounded-lg shadow-xl overflow-hidden ${className}`}>{children}</div>;
 
         const SmartInput = ({ value, onChange, min, max, className, placeholder }) => {
             const [local, setLocal] = useState(value);
             useEffect(() => setLocal(value), [value]);
-            const onBlur = () => {
-                let v = parseInt(local);
-                if (isNaN(v)) v = min;
-                v = Math.max(min, Math.min(max, v));
-                onChange(v);
-                setLocal(v);
-            };
+            const onBlur = () => { let v = parseInt(local); if (isNaN(v)) v = min; v = Math.max(min, Math.min(max, v)); onChange(v); setLocal(v); };
             return <input type="number" value={local} onChange={e => setLocal(e.target.value)} onBlur={onBlur} className={className} placeholder={placeholder} />;
         };
 
         const SliderInput = ({ label, value, onChange, min, max, step=1, className="" }) => (
             <div className={`flex flex-col gap-1 ${className}`}>
-                <div className="flex justify-between items-end">
-                    <label className="text-[10px] text-slate-400 font-bold uppercase">{label}</label>
-                    <SmartInput value={value} onChange={onChange} min={min} max={max} className="w-12 bg-slate-900 text-white text-xs p-1 rounded border border-slate-600 text-center font-mono" />
-                </div>
+                <div className="flex justify-between items-end"><label className="text-[10px] text-slate-400 font-bold uppercase">{label}</label><SmartInput value={value} onChange={onChange} min={min} max={max} className="w-12 bg-slate-900 text-white text-xs p-1 rounded border border-slate-600 text-center font-mono" /></div>
                 <input type="range" min={min} max={max} step={step} value={value} onChange={e => onChange(parseInt(e.target.value))} className="w-full accent-yellow-500 range-sm bg-slate-700 rounded-lg appearance-none cursor-pointer" />
             </div>
         );
 
         const VariableInput = ({ label, diceType, onDiceTypeChange, baseVal, onBaseValChange, modVal, onModChange, min, max }) => (
             <div className="flex flex-col gap-2">
-                 <div className="flex justify-between items-end">
-                    <label className="text-[10px] text-slate-400 font-bold uppercase">{label}</label>
-                 </div>
+                 <div className="flex justify-between items-end"><label className="text-[10px] text-slate-400 font-bold uppercase">{label}</label></div>
                  <div className="flex items-center gap-2">
                     <select value={diceType} onChange={(e) => onDiceTypeChange(e.target.value)} className="bg-slate-900 text-slate-200 text-xs rounded border border-slate-600 p-2 font-mono font-bold w-16 focus:ring-1 focus:ring-yellow-500">
                         <option value="fixed">Fix</option><option value="D3">D3</option><option value="D6">D6</option>
                     </select>
-                    <div className="flex-1">
-                        <SmartInput min={min} max={max} value={baseVal} onChange={onBaseValChange} className="w-full bg-slate-700 text-slate-200 p-2 rounded text-center font-bold border border-slate-600" />
-                    </div>
+                    <div className="flex-1"><SmartInput min={min} max={max} value={baseVal} onChange={onBaseValChange} className="w-full bg-slate-700 text-slate-200 p-2 rounded text-center font-bold border border-slate-600" /></div>
                     {diceType !== 'fixed' && <SmartInput min={0} max={10} value={modVal} onChange={onModChange} className="w-12 bg-slate-900 text-slate-200 p-2 rounded text-center font-bold border border-slate-600" placeholder="+0" />}
                  </div>
                  {diceType === 'fixed' && <input type="range" min={min} max={max} value={baseVal} onChange={e => onBaseValChange(parseInt(e.target.value))} className="w-full accent-yellow-500 range-sm bg-slate-700 rounded-lg appearance-none cursor-pointer" />}
@@ -253,16 +226,12 @@
 
         const Check = ({ label, checked, onChange }) => (
             <label className="flex items-center gap-2 cursor-pointer">
-                <div className={`w-4 h-4 border rounded flex items-center justify-center ${checked ? 'bg-yellow-500 border-yellow-500' : 'border-slate-500'}`}>
-                    {checked && <div className="w-2 h-2 bg-slate-900 rounded-sm" />}
-                </div>
+                <div className={`w-4 h-4 border rounded flex items-center justify-center ${checked ? 'bg-yellow-500 border-yellow-500' : 'border-slate-500'}`}>{checked && <div className="w-2 h-2 bg-slate-900 rounded-sm" />}</div>
                 <span className="text-xs text-slate-300 font-bold">{label}</span>
                 <input type="checkbox" checked={checked} onChange={e => onChange(e.target.checked)} className="hidden" />
             </label>
         );
 
-        const Card = ({ children, className }) => <div className={`bg-slate-800 border border-slate-700 rounded-lg shadow-xl overflow-hidden ${className}`}>{children}</div>;
-        
         const SectionHeader = ({ icon, title, rightContent }) => (
             <div className="flex items-center justify-between p-3 bg-slate-900/50 border-b border-slate-700">
                 <div className="flex items-center gap-2"><div className="text-yellow-500">{icon}</div><h3 className="font-bold text-slate-100 uppercase tracking-wider text-sm">{title}</h3></div>
@@ -275,10 +244,7 @@
             return (
                 <div className={`flex justify-between items-center p-3 rounded border ${highlight ? 'bg-yellow-500/10 border-yellow-500/50' : 'bg-slate-900/40 border-slate-700'}`}>
                     <div className="flex flex-col"><span className="text-[10px] text-slate-400 uppercase tracking-wider">{label}</span></div>
-                    <div className="text-right">
-                        <div className={`text-2xl font-black ${highlight ? 'text-yellow-400' : 'text-slate-100'}`}>{Number(val).toFixed(highlight ? 1 : 0)}</div>
-                        {cmp !== undefined && <div className={`text-xs font-bold ${diff >= 0 ? 'text-green-400' : 'text-red-400'}`}>{diff > 0 ? '+' : ''}{diff.toFixed(highlight ? 1 : 0)}</div>}
-                    </div>
+                    <div className="text-right"><div className={`text-2xl font-black ${highlight ? 'text-yellow-400' : 'text-slate-100'}`}>{Number(val).toFixed(highlight ? 1 : 0)}</div>{cmp !== undefined && <div className={`text-xs font-bold ${diff >= 0 ? 'text-green-400' : 'text-red-400'}`}>{diff > 0 ? '+' : ''}{diff.toFixed(highlight ? 1 : 0)}</div>}</div>
                 </div>
             );
         };
@@ -299,6 +265,76 @@
             </div>
         );
 
+        // --- Weapon Profile Card ---
+        const WeaponProfileCard = ({ profile, update, remove, copy, index, isSingle }) => {
+            const up = (k, v) => update(index, k, v);
+            return (
+                <div className="bg-slate-900/50 rounded border border-slate-700 mb-4 overflow-hidden">
+                    <div className="bg-slate-800 p-2 flex justify-between items-center border-b border-slate-700">
+                        <div className="flex items-center gap-2">
+                            <span className="text-yellow-500 font-bold text-xs">#{index + 1}</span>
+                            <input type="text" value={profile.name} onChange={e => up('name', e.target.value)} className="bg-transparent text-sm font-bold text-white w-32 focus:outline-none" />
+                        </div>
+                        <div className="flex gap-2">
+                            <button onClick={() => copy(index)} className="text-slate-400 hover:text-white" title="Duplicate">{Icons.Copy}</button>
+                            {!isSingle && <button onClick={() => remove(index)} className="text-red-400 hover:text-red-300" title="Remove">{Icons.Trash}</button>}
+                        </div>
+                    </div>
+                    
+                    <div className="p-3 space-y-4">
+                        <SliderInput label="COUNT (Models with this weapon)" value={profile.count} onChange={v => up('count', v)} min={1} max={50} />
+                        
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 bg-slate-900/50 p-2 rounded">
+                            <VariableInput label="ATTACKS / MODEL" diceType={profile.atkDice} onDiceTypeChange={v => up('atkDice', v)} baseVal={profile.atkFixed} onBaseValChange={v => up('atkFixed', v)} modVal={profile.atkMod} onModChange={v => up('atkMod', v)} min={1} max={20} />
+                            <VariableInput label="DAMAGE" diceType={profile.dmgDice} onDiceTypeChange={v => up('dmgDice', v)} baseVal={profile.dmgFixed} onBaseValChange={v => up('dmgFixed', v)} modVal={profile.dmgMod} onModChange={v => up('dmgMod', v)} min={1} max={20} />
+                        </div>
+
+                        <div className="grid grid-cols-3 gap-2">
+                            <SliderInput label="BS/WS" value={profile.bs} onChange={v => up('bs', v)} min={2} max={6} />
+                            <SliderInput label="STR" value={profile.strength} onChange={v => up('strength', v)} min={1} max={20} />
+                            <SliderInput label="AP" value={profile.ap} onChange={v => up('ap', v)} min={0} max={6} />
+                        </div>
+
+                        <div className="bg-slate-900/30 p-2 rounded border border-slate-700/50">
+                            <div className="flex justify-between mb-2"><span className="text-[10px] font-bold text-slate-500">KEYWORDS</span><div className="flex items-center gap-2"><span className={`text-[10px] font-bold ${profile.halfRange ? 'text-yellow-500' : 'text-slate-600'}`}>HALF RANGE</span><Check label="" checked={profile.halfRange} onChange={v => up('halfRange', v)} /></div></div>
+                            <div className="grid grid-cols-2 gap-y-1">
+                                <Check label="Lethal Hits" checked={profile.lethalHits} onChange={v => up('lethalHits', v)} />
+                                <Check label="Dev. Wounds" checked={profile.devastatingWounds} onChange={v => up('devastatingWounds', v)} />
+                                <Check label="Crit 5+" checked={profile.critHitOnFive} onChange={v => up('critHitOnFive', v)} />
+                                <Check label="Blast" checked={profile.blast} onChange={v => up('blast', v)} />
+                                <Check label="Twin-Linked" checked={profile.twinLinked} onChange={v => up('twinLinked', v)} />
+                                <Check label="Torrent" checked={profile.torrent} onChange={v => up('torrent', v)} />
+                                <Check label="Heavy (+1 Hit)" checked={profile.heavy} onChange={v => up('heavy', v)} />
+                                <Check label="Lance (+1 Wnd)" checked={profile.lance} onChange={v => up('lance', v)} />
+                            </div>
+                            <div className="grid grid-cols-2 gap-2 mt-2 pt-2 border-t border-slate-800">
+                                <div className="flex flex-col gap-1">
+                                    <div className="flex items-center gap-1"><SmartInput value={profile.sustainedHits} onChange={v => up('sustainedHits', v)} min={0} max={10} className="w-8 bg-slate-900 text-white text-[10px] p-1 rounded border border-slate-600 text-center" /><span className="text-[10px] text-slate-500">Sustained</span></div>
+                                </div>
+                                <div className="flex flex-col gap-1">
+                                    <div className="flex justify-between"><span className="text-[10px] text-slate-500">Rapid Fire</span><Check label="" checked={profile.rapidFire} onChange={v => up('rapidFire', v)} /></div>
+                                    {profile.rapidFire && <SmartInput value={profile.rapidFireVal} onChange={v => up('rapidFireVal', v)} min={1} max={6} className="w-full bg-slate-900 text-white text-[10px] p-1 rounded border border-slate-600" />}
+                                </div>
+                            </div>
+                            <div className="grid grid-cols-2 gap-2 mt-2 pt-2 border-t border-slate-800">
+                                <div className="flex flex-col gap-1">
+                                    <div className="flex justify-between"><span className="text-[10px] text-slate-500">Melta</span><Check label="" checked={profile.melta} onChange={v => up('melta', v)} /></div>
+                                    {profile.melta && <SmartInput value={profile.meltaVal} onChange={v => up('meltaVal', v)} min={1} max={6} className="w-full bg-slate-900 text-white text-[10px] p-1 rounded border border-slate-600" />}
+                                </div>
+                                <div className="flex flex-col gap-1">
+                                    <span className="text-[10px] text-slate-500">Anti-X</span><select value={profile.anti} onChange={(e) => up('anti', Number(e.target.value))} className="bg-slate-800 border-slate-600 rounded text-[10px] p-1 text-slate-200"><option value={7}>None</option><option value={2}>2+</option><option value={3}>3+</option><option value={4}>4+</option><option value={5}>5+</option><option value={6}>6+</option></select>
+                                </div>
+                            </div>
+                            <div className="grid grid-cols-2 gap-2 mt-2 pt-2 border-t border-slate-800">
+                                <SliderInput label="RR HIT (Cap)" value={profile.hitRerollCap} onChange={v => up('hitRerollCap', v)} min={0} max={5} />
+                                <SliderInput label="RR WND (Cap)" value={profile.woundRerollCap} onChange={v => up('woundRerollCap', v)} min={0} max={5} />
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
         const Modal = ({ title, onClose, children }) => (
             <div className="fixed inset-0 bg-slate-950/90 z-50 flex items-center justify-center p-4">
                 <div className="bg-slate-900 border border-slate-700 rounded-xl w-full max-w-md p-6 shadow-2xl">
@@ -308,249 +344,153 @@
             </div>
         );
 
-        const ShareModal = ({ code, onClose, onImport }) => {
-            const [copied, setCopied] = useState(false);
-            const [importCode, setImportCode] = useState("");
-            
-            const handleCopy = () => {
-                if (navigator.clipboard && window.isSecureContext) {
-                    navigator.clipboard.writeText(code).then(() => setCopied(true));
-                } else {
-                    const el = document.createElement('textarea');
-                    el.value = code;
-                    document.body.appendChild(el);
-                    el.select();
-                    document.execCommand('copy');
-                    document.body.removeChild(el);
-                    setCopied(true);
-                }
-                setTimeout(() => setCopied(false), 2000);
-            };
-
-            return (
-                <Modal title="Share / Import" onClose={onClose}>
-                    <div className="space-y-4">
-                        <div>
-                            <p className="text-xs text-slate-400 mb-1 font-bold">SHARE THIS CODE</p>
-                            <textarea readOnly value={code} onClick={(e) => e.target.select()} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-xs font-mono text-slate-300 h-20 mb-2 break-all" />
-                            <button onClick={handleCopy} className={`w-full py-2 rounded font-bold text-xs ${copied ? 'bg-green-600 text-white' : 'bg-blue-600 text-white'}`}>{copied ? "COPIED" : "COPY CODE"}</button>
-                        </div>
-                        <div className="border-t border-slate-700 pt-4">
-                            <p className="text-xs text-slate-400 mb-1 font-bold">IMPORT CODE</p>
-                            <input type="text" value={importCode} onChange={e => setImportCode(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-xs font-mono text-white mb-2" placeholder="Paste code here..." />
-                            <button onClick={() => onImport(importCode)} className="w-full bg-yellow-600 hover:bg-yellow-500 text-white font-bold py-2 rounded text-xs">IMPORT SETTINGS</button>
-                        </div>
-                    </div>
-                </Modal>
-            );
-        };
-
         const ProfileModal = ({ onClose, onLoad }) => {
             const [profiles, setProfiles] = useState([]);
             const [newProfileName, setNewProfileName] = useState("");
-            useEffect(() => {
-                const saved = safeStorage.get('mh_pro');
-                if (saved) try { setProfiles(JSON.parse(saved)); } catch(e){}
-            }, []);
-            const saveProfile = (data) => {
-                if(!newProfileName.trim()) return;
-                const newP = [...profiles, { name: newProfileName, data }];
-                setProfiles(newP);
-                safeStorage.set('mh_pro', JSON.stringify(newP));
-                setNewProfileName("");
-            };
-            const deleteProfile = (idx) => {
-                const newP = profiles.filter((_,i) => i !== idx);
-                setProfiles(newP);
-                safeStorage.set('mh_pro', JSON.stringify(newP));
-            }
+            useEffect(() => { const saved = safeStorage.get('mh_pro_v2_profiles'); if (saved) try { setProfiles(JSON.parse(saved)); } catch(e){} }, []);
+            const saveProfile = (data) => { if(!newProfileName.trim()) return; const newP = [...profiles, { name: newProfileName, data }]; setProfiles(newP); safeStorage.set('mh_pro_v2_profiles', JSON.stringify(newP)); setNewProfileName(""); };
+            const deleteProfile = (idx) => { const newP = profiles.filter((_,i) => i !== idx); setProfiles(newP); safeStorage.set('mh_pro_v2_profiles', JSON.stringify(newP)); }
             return (
                 <Modal title="Profile Manager" onClose={onClose}>
-                    <div className="flex gap-2 mb-6">
-                        <input type="text" value={newProfileName} onChange={(e) => setNewProfileName(e.target.value)} placeholder="Profile Name..." className="flex-1 bg-slate-800 border border-slate-600 rounded p-2 text-white" />
-                        <button onClick={() => onLoad((data) => saveProfile(data))} className="bg-yellow-600 hover:bg-yellow-500 text-white font-bold px-4 rounded">Save</button>
-                    </div>
-                    <div className="space-y-2 max-h-60 overflow-y-auto custom-scrollbar">
-                        {profiles.length === 0 && <p className="text-slate-500 text-center italic">No profiles saved.</p>}
-                        {profiles.map((p, idx) => (
-                            <div key={idx} className="flex justify-between items-center bg-slate-800 p-3 rounded border border-slate-700">
-                                <span className="font-medium text-slate-200">{p.name}</span>
-                                <div className="flex gap-2">
-                                    <button onClick={() => { onLoad(null, p.data); onClose(); }} className="text-xs bg-blue-600 hover:bg-blue-500 px-3 py-1 rounded text-white">Load</button>
-                                    <button onClick={() => deleteProfile(idx)} className="text-xs bg-red-900/50 hover:bg-red-900 text-red-200 px-2 py-1 rounded">Del</button>
-                                </div>
-                            </div>
-                        ))}
-                    </div>
+                    <div className="flex gap-2 mb-6"><input type="text" value={newProfileName} onChange={(e) => setNewProfileName(e.target.value)} placeholder="Name..." className="flex-1 bg-slate-800 border border-slate-600 rounded p-2 text-white" /><button onClick={() => onLoad((data) => saveProfile(data))} className="bg-yellow-600 hover:bg-yellow-500 text-white font-bold px-4 rounded">Save</button></div>
+                    <div className="space-y-2 max-h-60 overflow-y-auto custom-scrollbar">{profiles.map((p, idx) => (<div key={idx} className="flex justify-between items-center bg-slate-800 p-3 rounded border border-slate-700"><span className="font-medium text-slate-200">{p.name}</span><div className="flex gap-2"><button onClick={() => { onLoad(null, p.data); onClose(); }} className="text-xs bg-blue-600 px-3 py-1 rounded text-white">Load</button><button onClick={() => deleteProfile(idx)} className="text-xs bg-red-900/50 text-red-200 px-2 py-1 rounded">Del</button></div></div>))}</div>
                 </Modal>
             );
         };
 
-        // --- 4. Main App ---
+        const ImportModal = ({ onClose, onImport }) => {
+            const [text, setText] = useState("");
+            const parseAndImport = () => {
+                const parseVal = (regex) => { const m = text.match(regex); return m ? parseInt(m[1]) : null; };
+                const t = parseVal(/(?:T|Toughness)[\s:]*(\d+)/i);
+                const sv = parseVal(/(?:Sv|Save)[\s:]*(\d+)\+?/i);
+                const w = parseVal(/(?:W|Wounds)[\s:]*(\d+)/i);
+                const inv = parseVal(/(?:Inv|Invuln)[\s:]*(\d+)\+?/i) || parseVal(/(\d+)\+\+/);
+                const fnp = parseVal(/(?:FNP|Feel No Pain)[\s:]*(\d+)\+?/i) || parseVal(/(\d+)\+\+\+/);
+                onImport({ t, sv, w, inv, fnp });
+                onClose();
+            };
+            return (
+                <Modal title="Smart Paste" onClose={onClose}>
+                    <p className="text-xs text-slate-400 mb-2">Paste stat line (e.g. "T4 Sv3+ W2 4++")</p>
+                    <textarea value={text} onChange={e => setText(e.target.value)} className="w-full h-32 bg-slate-800 border border-slate-600 rounded p-2 text-white mb-4" placeholder="Paste stats here..." />
+                    <button onClick={parseAndImport} className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold p-2 rounded">Import</button>
+                </Modal>
+            );
+        };
+
+        // --- Main App ---
         function App() {
             const [state, setState] = useState({
-                attackerModels: 5, attackerPoints: 100,
-                atkDice: 'fixed', atkFixed: 2, atkMod: 0,
-                bs: 3, strength: 4, ap: 0,
-                dmgDice: 'fixed', dmgFixed: 1, dmgMod: 0,
-                lethalHits: false, sustainedHits: 0, devastatingWounds: false, anti: 7, blast: false, torrent: false, melta: false, meltaVal: 2,
-                heavy: false, lance: false, twinLinked: false, rapidFire: false, rapidFireVal: 1, halfRange: false,
-                hitRerollCap: 0, woundRerollCap: 0, critHitOnFive: false,
-                defenderModels: 5, toughness: 4, save: 3, invuln: 7, wounds: 1, fnp: 7,
-                defMinusHit: false, defMinusWound: false, defMinusDamage: false, defHalveDamage: false
+                unitPoints: 100,
+                profiles: [{ ...DEFAULT_PROFILE, id: generateId() }],
+                defender: { defenderModels: 5, toughness: 4, save: 3, invuln: 7, wounds: 1, fnp: 7 },
+                globalOptions: { defMinusHit: false, defMinusWound: false, defMinusDamage: false, defHalveDamage: false }
             });
 
             const [results, setResults] = useState({ avgAtk: 0, avgHit: 0, avgWnd: 0, avgFail: 0, avgDmg: 0, avgDead: 0, wipeChance: 0, dist: [] });
             const [frozen, setFrozen] = useState(null);
             const [showProfiles, setShowProfiles] = useState(false);
-            const [showShare, setShowShare] = useState(false);
-            const [shareCode, setShareCode] = useState("");
+            const [showImport, setShowImport] = useState(false);
 
-            const update = (key, val) => setState(p => ({ ...p, [key]: val }));
-
-            // Load profiles on mount (if available)
-            useEffect(() => {
-                const p = safeStorage.get('mh_pro');
-                if(p) try { const parsed = JSON.parse(p); if (parsed.length > 0) {} } catch(e){}
-            }, []);
-
-            // Calculation loop
+            useEffect(() => { const p = safeStorage.get('mh_pro_v2'); if(p) try { setState(JSON.parse(p)); } catch(e){} }, []);
+            useEffect(() => { safeStorage.set('mh_pro_v2', JSON.stringify(state)); }, [state]);
             useEffect(() => { setResults(runSimulation(state)); }, [state]);
+
+            const updateDefender = (k, v) => setState(s => ({ ...s, defender: { ...s.defender, [k]: v } }));
+            const updateGlobal = (k, v) => setState(s => ({ ...s, globalOptions: { ...s.globalOptions, [k]: v } }));
+            const updateUnitPoints = (v) => setState(s => ({ ...s, unitPoints: v }));
+            
+            const updateProfile = (idx, k, v) => {
+                const newProfiles = [...state.profiles];
+                newProfiles[idx] = { ...newProfiles[idx], [k]: v };
+                setState(s => ({ ...s, profiles: newProfiles }));
+            };
+            const addProfile = () => setState(s => ({ ...s, profiles: [...s.profiles, { ...DEFAULT_PROFILE, id: generateId(), name: `Weapon ${s.profiles.length + 1}` }] }));
+            const removeProfile = (idx) => setState(s => ({ ...s, profiles: s.profiles.filter((_, i) => i !== idx) }));
+            const copyProfile = (idx) => setState(s => ({ ...s, profiles: [...s.profiles, { ...s.profiles[idx], id: generateId(), name: `${s.profiles[idx].name} (Copy)` }] }));
+
+            const handleImport = (data) => {
+                const def = { ...state.defender };
+                if (data.t) def.toughness = data.t;
+                if (data.sv) def.save = data.sv;
+                if (data.w) def.wounds = data.w;
+                if (data.inv) def.invuln = data.inv;
+                if (data.fnp) def.fnp = data.fnp;
+                setState(s => ({ ...s, defender: def }));
+            };
 
             const resetAll = () => {
                 setState({
-                    attackerModels: 5, attackerPoints: 100, atkDice: 'fixed', atkFixed: 2, atkMod: 0, bs: 3, strength: 4, ap: 0, dmgDice: 'fixed', dmgFixed: 1, dmgMod: 0,
-                    lethalHits: false, sustainedHits: 0, devastatingWounds: false, anti: 7, blast: false, torrent: false, melta: false, meltaVal: 2, heavy: false, lance: false, twinLinked: false, rapidFire: false, rapidFireVal: 1, halfRange: false, hitRerollCap: 0, woundRerollCap: 0, critHitOnFive: false,
-                    defenderModels: 5, toughness: 4, save: 3, invuln: 7, wounds: 1, fnp: 7, defMinusHit: false, defMinusWound: false, defMinusDamage: false, defHalveDamage: false
+                    unitPoints: 100,
+                    profiles: [{ ...DEFAULT_PROFILE, id: generateId() }],
+                    defender: { defenderModels: 5, toughness: 4, save: 3, invuln: 7, wounds: 1, fnp: 7 },
+                    globalOptions: { defMinusHit: false, defMinusWound: false, defMinusDamage: false, defHalveDamage: false }
                 });
                 setFrozen(null);
             };
 
-            const genShare = () => {
-                try {
-                    const code = btoa(JSON.stringify(state));
-                    setShareCode(code);
-                    setShowShare(true);
-                } catch(e) { alert("Error generating code"); }
-            };
-
-            const importShare = (code) => {
-                try {
-                    const data = JSON.parse(atob(code));
-                    setState(prev => ({ ...prev, ...data }));
-                    setShowShare(false);
-                } catch(e) { alert("Invalid Code"); }
-            };
-
-            const TARGETS = [
-                { label: "Target...", t: 4, sv: 3, inv: 7, w: 1, fnp: 7 },
-                { label: "MEQ", t: 4, sv: 3, inv: 7, w: 2, fnp: 7 },
-                { label: "TEQ", t: 5, sv: 2, inv: 4, w: 3, fnp: 7 },
-                { label: "Rhino", t: 9, sv: 3, inv: 7, w: 10, fnp: 7 },
-                { label: "Knight", t: 12, sv: 3, inv: 5, w: 22, fnp: 6 }
-            ];
-
-            const pointsPerWound = results.avgDead > 0 ? (state.attackerPoints / (results.avgDead * state.wounds)).toFixed(1) : "-";
-            const pointsPerKill = results.avgDead > 0 ? (state.attackerPoints / results.avgDead).toFixed(1) : "-";
+            const TARGETS = [{ label: "Target...", t: 4, sv: 3, inv: 7, w: 1, fnp: 7 }, { label: "MEQ", t: 4, sv: 3, inv: 7, w: 2, fnp: 7 }, { label: "TEQ", t: 5, sv: 2, inv: 4, w: 3, fnp: 7 }, { label: "Rhino", t: 9, sv: 3, inv: 7, w: 10, fnp: 7 }, { label: "Knight", t: 12, sv: 3, inv: 5, w: 22, fnp: 6 }];
+            const pointsPerKill = results.avgDead > 0 ? (state.unitPoints / results.avgDead).toFixed(1) : "-";
 
             return (
                 <div className="max-w-5xl mx-auto p-4 space-y-4">
-                    {/* Header */}
                     <div className="flex justify-between items-center border-b border-slate-800 pb-4">
                         <div className="flex items-center gap-2"><div className="bg-yellow-500 p-2 rounded text-slate-900">{Icons.Crosshair}</div><div><h1 className="text-xl font-black uppercase text-white">MathHammer Pro</h1></div></div>
                         <div className="flex gap-2">
-                            <button onClick={() => setShowProfiles(!showProfiles)} className="px-3 py-2 bg-blue-900 rounded text-xs font-bold text-blue-100 flex items-center gap-1">{Icons.Save} SAVES</button>
-                            <button onClick={genShare} className="px-3 py-2 bg-slate-700 rounded text-xs font-bold text-white flex items-center gap-1">{Icons.Share} SHARE</button>
+                            <button onClick={() => setShowProfiles(!showProfiles)} className="px-3 py-2 bg-blue-900 rounded text-xs font-bold text-blue-100 flex items-center gap-1">{Icons.Save} LOAD</button>
                             <button onClick={() => frozen ? setFrozen(null) : setFrozen(results)} className={`px-3 py-2 rounded text-xs font-bold flex items-center gap-1 ${frozen ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-400'}`}>{Icons.Snow} CMP</button>
                             <button onClick={resetAll} className="px-3 py-2 bg-slate-800 rounded text-xs font-bold text-slate-400 flex items-center gap-1">{Icons.RotateCcw} RST</button>
                         </div>
                     </div>
-
                     {showProfiles && <ProfileModal onClose={() => setShowProfiles(false)} onLoad={(saver, data) => saver ? saver(state) : setState(data)} />}
-                    {showShare && <ShareModal code={shareCode} onClose={() => setShowShare(false)} onImport={importShare} />}
+                    {showImport && <ImportModal onClose={() => setShowImport(false)} onImport={handleImport} />}
 
                     <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-                        {/* ATTACKER */}
                         <div className="lg:col-span-7 space-y-4">
                             <Card>
-                                <SectionHeader icon={Icons.Sword} title="ATTACKER" />
-                                <div className="p-4 space-y-4">
-                                    <div className="grid grid-cols-2 gap-4">
-                                        <SliderInput label="MODELS" value={state.attackerModels} onChange={v => update('attackerModels', v)} min={1} max={50} className="w-full" />
-                                        <SliderInput label="POINTS" value={state.attackerPoints} onChange={v => update('attackerPoints', v)} min={1} max={2000} step={5} className="w-full" />
+                                <SectionHeader icon={Icons.Sword} title="ATTACKER UNIT" />
+                                <div className="p-4">
+                                    <div className="flex items-end gap-2 mb-4">
+                                        <div className="flex-1"><label className="text-xs text-slate-400 font-bold">TOTAL POINTS</label><SmartInput value={state.unitPoints} onChange={updateUnitPoints} min={0} max={5000} className="w-full bg-slate-900 text-white p-2 rounded border border-slate-600 text-center" /></div>
+                                        <button onClick={addProfile} className="bg-green-600 hover:bg-green-500 text-white font-bold py-2 px-4 rounded h-[42px] flex items-center gap-2">{Icons.Plus} ADD WEAPON</button>
                                     </div>
-                                    <div className="bg-slate-900/50 p-3 rounded border border-slate-700 space-y-3">
-                                        <div className="grid grid-cols-2 gap-6">
-                                            <VariableInput label="ATTACKS / MODEL" diceType={state.atkDice} onDiceTypeChange={v => update('atkDice', v)} baseVal={state.atkFixed} onBaseValChange={v => update('atkFixed', v)} modVal={state.atkMod} onModChange={v => update('atkMod', v)} min={1} max={20} />
-                                            <VariableInput label="DAMAGE" diceType={state.dmgDice} onDiceTypeChange={v => update('dmgDice', v)} baseVal={state.dmgFixed} onBaseValChange={v => update('dmgFixed', v)} modVal={state.dmgMod} onModChange={v => update('dmgMod', v)} min={1} max={20} />
-                                        </div>
-                                        <div className="grid grid-cols-3 gap-4">
-                                            <SliderInput label="BS / WS" value={state.bs} onChange={v => update('bs', v)} min={2} max={6} />
-                                            <SliderInput label="STR" value={state.strength} onChange={v => update('strength', v)} min={1} max={20} />
-                                            <SliderInput label="AP" value={state.ap} onChange={v => update('ap', v)} min={0} max={6} />
-                                        </div>
-                                    </div>
-                                    <div className="bg-slate-900/30 p-3 rounded border border-slate-700">
-                                        <div className="flex justify-between mb-2"><span className="text-xs font-bold text-slate-500">KEYWORDS</span><div className="flex items-center gap-2"><span className={`text-xs font-bold ${state.halfRange ? 'text-yellow-500' : 'text-slate-600'}`}>HALF RANGE</span><Check label="" checked={state.halfRange} onChange={v => update('halfRange', v)} /></div></div>
-                                        <div className="grid grid-cols-2 gap-y-2">
-                                            <Check label="Lethal Hits" checked={state.lethalHits} onChange={v => update('lethalHits', v)} />
-                                            <Check label="Dev. Wounds" checked={state.devastatingWounds} onChange={v => update('devastatingWounds', v)} />
-                                            <Check label="Crit on 5+" checked={state.critHitOnFive} onChange={v => update('critHitOnFive', v)} />
-                                            <Check label="Blast" checked={state.blast} onChange={v => update('blast', v)} />
-                                            <Check label="Twin-Linked" checked={state.twinLinked} onChange={v => update('twinLinked', v)} />
-                                            <Check label="Torrent" checked={state.torrent} onChange={v => update('torrent', v)} />
-                                            <Check label="Heavy (+1 Hit)" checked={state.heavy} onChange={v => update('heavy', v)} />
-                                            <Check label="Lance (+1 Wnd)" checked={state.lance} onChange={v => update('lance', v)} />
-                                        </div>
-                                        <div className="grid grid-cols-2 gap-4 mt-3 pt-3 border-t border-slate-800">
-                                            <div className="flex flex-col gap-1">
-                                                <label className="text-[10px] text-slate-500 font-bold uppercase">SUSTAINED HITS</label>
-                                                <div className="flex items-center gap-2">
-                                                    <SmartInput value={state.sustainedHits} onChange={v => update('sustainedHits', v)} min={0} max={10} className="w-10 bg-slate-900 text-white text-xs p-1 rounded border border-slate-600 text-center" />
-                                                    <span className="text-xs text-slate-600">Extra Hits</span>
-                                                </div>
-                                            </div>
-                                            <div className="flex flex-col gap-1">
-                                                <div className="flex justify-between"><span className="text-xs text-slate-400">Rapid Fire</span><Check label="" checked={state.rapidFire} onChange={v => update('rapidFire', v)} /></div>
-                                                {state.rapidFire && <SmartInput value={state.rapidFireVal} onChange={v => update('rapidFireVal', v)} min={1} max={6} className="w-full bg-slate-900 text-white text-xs p-1 rounded border border-slate-600" />}
-                                            </div>
-                                        </div>
-                                        <div className="grid grid-cols-2 gap-4 mt-3 pt-3 border-t border-slate-800">
-                                            <SliderInput label="RR HIT (Cap)" value={state.hitRerollCap} onChange={v => update('hitRerollCap', v)} min={0} max={5} />
-                                            <SliderInput label="RR WND (Cap)" value={state.woundRerollCap} onChange={v => update('woundRerollCap', v)} min={0} max={5} />
-                                        </div>
-                                        <div className="mt-2 flex items-center justify-between"><span className="text-xs text-slate-400">Anti-X</span><select value={state.anti} onChange={(e) => update('anti', Number(e.target.value))} className="bg-slate-800 border-slate-600 rounded text-xs p-1 text-slate-200"><option value={7}>None</option><option value={2}>2+</option><option value={3}>3+</option><option value={4}>4+</option><option value={5}>5+</option><option value={6}>6+</option></select></div>
+                                    <div className="space-y-4">
+                                        {state.profiles.map((p, i) => (
+                                            <WeaponProfileCard key={p.id} index={i} profile={p} update={updateProfile} remove={removeProfile} copy={copyProfile} isSingle={state.profiles.length === 1} />
+                                        ))}
                                     </div>
                                 </div>
                             </Card>
 
                             <Card>
                                 <SectionHeader icon={Icons.Shield} title="DEFENDER" rightContent={
-                                    <select className="bg-slate-800 text-xs border border-slate-600 rounded p-1" onChange={e => {
-                                        const p = TARGETS[e.target.selectedIndex];
-                                        if(p && p.t) { update('toughness', p.t); update('save', p.sv); update('invuln', p.inv); update('wounds', p.w); update('fnp', p.fnp); }
-                                    }}>{TARGETS.map((t,i) => <option key={i}>{t.label}</option>)}</select>
+                                    <div className="flex gap-2">
+                                        <button onClick={() => setShowImport(true)} className="bg-blue-900/50 hover:bg-blue-800 text-blue-100 text-xs px-2 py-1 rounded flex items-center gap-1">{Icons.Paste} IMPORT</button>
+                                        <select className="bg-slate-800 text-xs border border-slate-600 rounded p-1" onChange={e => {
+                                            const p = TARGETS[e.target.selectedIndex]; if(p && p.t) { updateDefender('toughness', p.t); updateDefender('save', p.sv); updateDefender('invuln', p.inv); updateDefender('wounds', p.w); updateDefender('fnp', p.fnp); }
+                                        }}>{TARGETS.map((t,i) => <option key={i}>{t.label}</option>)}</select>
+                                    </div>
                                 } />
                                 <div className="p-4 space-y-4">
                                     <div className="grid grid-cols-2 sm:grid-cols-6 gap-2">
-                                        <SliderInput label="COUNT" value={state.defenderModels} onChange={v => update('defenderModels', v)} min={1} max={50} />
-                                        <SliderInput label="T" value={state.toughness} onChange={v => update('toughness', v)} min={1} max={20} />
-                                        <SliderInput label="SV" value={state.save} onChange={v => update('save', v)} min={2} max={6} />
-                                        <SliderInput label="INV" value={state.invuln} onChange={v => update('invuln', v)} min={2} max={7} />
-                                        <SliderInput label="W" value={state.wounds} onChange={v => update('wounds', v)} min={1} max={30} />
-                                        <SliderInput label="FNP" value={state.fnp} onChange={v => update('fnp', v)} min={4} max={7} />
+                                        <SliderInput label="COUNT" value={state.defender.defenderModels} onChange={v => updateDefender('defenderModels', v)} min={1} max={50} />
+                                        <SliderInput label="T" value={state.defender.toughness} onChange={v => updateDefender('toughness', v)} min={1} max={20} />
+                                        <SliderInput label="SV" value={state.defender.save} onChange={v => updateDefender('save', v)} min={2} max={6} />
+                                        <SliderInput label="INV" value={state.defender.invuln} onChange={v => updateDefender('invuln', v)} min={2} max={7} />
+                                        <SliderInput label="W" value={state.defender.wounds} onChange={v => updateDefender('wounds', v)} min={1} max={30} />
+                                        <SliderInput label="FNP" value={state.defender.fnp} onChange={v => updateDefender('fnp', v)} min={4} max={7} />
                                     </div>
                                     <div className="bg-slate-900/50 p-2 rounded border border-slate-700 grid grid-cols-2 gap-2">
-                                        <Check label="-1 Hit" checked={state.defMinusHit} onChange={v => update('defMinusHit', v)} />
-                                        <Check label="-1 Wound" checked={state.defMinusWound} onChange={v => update('defMinusWound', v)} />
-                                        <Check label="-1 Dmg" checked={state.defMinusDamage} onChange={v => update('defMinusDamage', v)} />
-                                        <Check label="&frac12; Dmg" checked={state.defHalveDamage} onChange={v => update('defHalveDamage', v)} />
+                                        <Check label="-1 Hit" checked={state.globalOptions.defMinusHit} onChange={v => updateGlobal('defMinusHit', v)} />
+                                        <Check label="-1 Wound" checked={state.globalOptions.defMinusWound} onChange={v => updateGlobal('defMinusWound', v)} />
+                                        <Check label="-1 Dmg" checked={state.globalOptions.defMinusDamage} onChange={v => updateGlobal('defMinusDamage', v)} />
+                                        <Check label="&frac12; Dmg" checked={state.globalOptions.defHalveDamage} onChange={v => updateGlobal('defHalveDamage', v)} />
                                     </div>
                                 </div>
                             </Card>
                         </div>
 
-                        {/* RESULTS */}
                         <div className="lg:col-span-5 space-y-6">
                             <Card className={frozen ? "border-blue-500/50" : "border-yellow-500/30"}>
                                 <div className="bg-slate-900 p-3 flex justify-between items-center border-b border-slate-700">
@@ -566,14 +506,10 @@
                                     <ResultRow label="UNSAVED" val={results.avgFail} cmp={frozen?.avgFail} />
                                     <div className="flex justify-center text-slate-600 -my-2">{Icons.Arrow}</div>
                                     <ResultRow label="DAMAGE" val={results.avgDmg} cmp={frozen?.avgDmg} highlight={true} />
-
                                     <div className="mt-4 bg-slate-900 p-4 rounded border border-slate-700">
                                         <div className="flex justify-between items-center mb-2">
                                             <span className="text-slate-400 font-bold text-xs uppercase">DEAD MODELS</span>
-                                            <div className="text-right">
-                                                <div className="text-2xl font-black text-white">{results.avgDead.toFixed(1)}</div>
-                                                {frozen && <div className={`text-xs font-bold ${results.avgDead >= frozen.avgDead ? 'text-green-400' : 'text-red-400'}`}>{(results.avgDead - frozen.avgDead).toFixed(1)}</div>}
-                                            </div>
+                                            <div className="text-right"><div className="text-2xl font-black text-white">{results.avgDead.toFixed(1)}</div>{frozen && <div className={`text-xs font-bold ${results.avgDead >= frozen.avgDead ? 'text-green-400' : 'text-red-400'}`}>{(results.avgDead - frozen.avgDead).toFixed(1)}</div>}</div>
                                         </div>
                                         <div className="flex justify-between items-center text-xs text-slate-500 border-t border-slate-800 pt-2">
                                             <span className="flex items-center gap-1">{Icons.Coins} <span className="text-yellow-500 font-bold">{pointsPerKill}</span> Pts/Kill</span>
@@ -589,11 +525,8 @@
                 </div>
             );
         }
-
         const root = ReactDOM.createRoot(document.getElementById('root'));
         root.render(<App />);
     </script>
 </body>
 </html>
-
-
